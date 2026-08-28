@@ -1,3 +1,16 @@
+from flask import Flask
+import threading
+
+app_web = Flask('')
+
+@app_web.route('/')
+def home():
+    return "Bot is running!"
+
+def run():
+    app_web.run(host='0.0.0.0', port=8080)
+
+threading.Thread(target=run).start()
 import os
 import asyncio
 import aiohttp
