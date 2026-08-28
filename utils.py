@@ -81,3 +81,17 @@ def friendly_error_message(error_text: str) -> str:
         return "❌ Terabox লিংক থেকে ডাউনলোড লিংক পাওয়া যায়নি। লিংকটা আবার চেক করুন।"
 
     return f"❌ ডাউনলোড ব্যর্থ হয়েছে:\n{error_text[:250]}"
+
+
+async def is_subscribed(bot, user_id: int) -> bool:
+    """Check if a user is a member of the required channel."""
+    if not config.FORCE_SUB_ENABLED:
+        return True
+    try:
+        member = await bot.get_chat_member(f"@{config.CHANNEL_USERNAME}", user_id)
+        return member.status in ("member", "administrator", "creator")
+    except Exception as e:
+        logger.error("Subscription check failed: %s", e)
+        # If the check itself fails (e.g. bot not admin in channel),
+        # fail safe by allowing access rather than blocking everyone.
+        return True
