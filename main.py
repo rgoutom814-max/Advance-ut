@@ -1,10 +1,12 @@
 import os
 import re
-import asyncio
 import threading
 import tempfile
+import shutil
+import urllib.parse
 
-import aiohttp
+import requests
+import yt_dlp
 from flask import Flask
 from pyrogram import Client, filters
 
@@ -17,20 +19,14 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID_TEXT = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 
-COBALT_API = os.getenv(
-    "COBALT_API",
-    "https://api.cobalt.tools"
-).rstrip("/")
-
-COBALT_API_KEY = os.getenv("COBALT_API_KEY")
-
+# Optional: needed only for Terabox links. Get this from your own browser's
+# cookies after logging into terabox.com (the "ndus" cookie value).
+TERABOX_NDUS = os.getenv("TERABOX_NDUS")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is missing")
-
 if not API_ID_TEXT:
     raise RuntimeError("API_ID environment variable is missing")
-
 if not API_HASH:
     raise RuntimeError("API_HASH environment variable is missing")
 
@@ -39,9 +35,18 @@ try:
 except ValueError:
     raise RuntimeError("API_ID must contain only numbers")
 
+# Telegram bot API upload limit (bytes) - 2GB for premium/local bot API, 50MB default for normal bots
+MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE_MB", "2000")) * 1024 * 1024
+
+TERABOX_DOMAINS = (
+    "terabox.com", "1024tera.com", "terasharelink.com", "nephobox.com",
+    "1024terabox.com", "4funbox.com", "mirrobox.com", "momerybox.com",
+    "teraboxapp.com", "teraboxlink.com", "freeterabox.com",
+)
+
 
 # ============================================================
-# FLASK SERVER FOR RENDER
+# FLASK SERVER (for Render/Railway health checks)
 # ============================================================
 
 web = Flask(__name__)
@@ -59,12 +64,7 @@ def health():
 
 def run_web_server():
     port = int(os.getenv("PORT", "8080"))
-    web.run(
-        host="0.0.0.0",
-        port=port,
-        debug=False,
-        use_reloader=False
-    )
+    web.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 
 # ============================================================
@@ -75,7 +75,7 @@ app = Client(
     "downloader_bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
 )
 
 
@@ -87,134 +87,13 @@ app = Client(
 async def start_command(client, message):
     await message.reply_text(
         "👋 হ্যালো!\n\n"
-        "একটি public video/media link পাঠান।\n"
-        "আমি সেটি প্রসেস করার চেষ্টা করব।"
+        "YouTube, Instagram, Facebook, Twitter/X, TikTok ইত্যাদি থেকে "
+        "একটি public video link পাঠান, আমি ডাউনলোড করে পাঠিয়ে দেব।"
     )
 
 
 # ============================================================
-# COBALT ERROR
-# ============================================================
-
-def format_api_error(data):
-    error = data.get("error", {})
-
-    if not isinstance(error, dict):
-        return "❌ ভিডিওটি প্রসেস করা যায়নি।"
-
-    code = error.get("code", "unknown_error")
-    context = error.get("context", {})
-
-    if not isinstance(context, dict):
-        context = {}
-
-    service = context.get("service")
-    limit = context.get("limit")
-
-    if code == "error.api.rate_exceeded":
-        return "⏳ এখন অনেক বেশি request হয়েছে।\nকিছুক্ষণ পরে আবার চেষ্টা করুন।"
-
-    if code == "error.api.capacity":
-        return "⏳ Downloader server এখন ব্যস্ত।\nকিছুক্ষণ পরে আবার চেষ্টা করুন।"
-
-    if code == "error.api.service.unsupported":
-        return "❌ এই service বর্তমানে supported নয়।"
-
-    if code == "error.api.platform.unsupported":
-        return "❌ এই platform বর্তমানে supported নয়।"
-
-    if code.startswith("error.api.auth"):
-        return "❌ Cobalt API authentication সমস্যা হয়েছে।"
-
-    if limit:
-        return f"❌ ফাইলটি server-এর limit-এর বাইরে।\nLimit: {limit}"
-
-    if service:
-        return f"❌ ভিডিওটি প্রসেস করা যায়নি।\nService: {service}\nError: {code}"
-
-    return f"❌ ভিডিওটি প্রসেস করা যায়নি।\nError: {code}"
-
-
-# ============================================================
-# COBALT REQUEST
-# ============================================================
-
-async def process_with_cobalt(url):
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Telegram-Downloader-Bot"
-    }
-
-    if COBALT_API_KEY:
-        headers["Authorization"] = f"Api-Key {COBALT_API_KEY}"
-
-    payload = {
-        "url": url,
-        "videoQuality": "720",
-        "audioFormat": "best",
-        "downloadMode": "auto",
-        "youtubeVideoCodec": "h264",
-        "youtubeVideoContainer": "mp4",
-        "disableMetadata": False,
-        "alwaysProxy": True,
-        "filenameStyle": "pretty"
-    }
-
-    timeout = aiohttp.ClientTimeout(
-        total=120, connect=20, sock_connect=20, sock_read=120
-    )
-
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                f"{COBALT_API}/", json=payload, headers=headers
-            ) as response:
-                text = await response.text()
-                print("Cobalt HTTP:", response.status)
-                print("Cobalt response:", text[:2000])
-
-                if response.status != 200:
-                    return {"status": "error", "error": {"code": f"http_{response.status}"}}
-
-                try:
-                    return await response.json(content_type=None)
-                except Exception:
-                    return {"status": "error", "error": {"code": "invalid_json_response"}}
-
-    except asyncio.TimeoutError:
-        return {"status": "error", "error": {"code": "request_timeout"}}
-
-    except aiohttp.ClientError as e:
-        print("Cobalt connection error:", repr(e))
-        return {"status": "error", "error": {"code": "connection_error"}}
-
-    except Exception as e:
-        print("Cobalt unexpected error:", repr(e))
-        return {"status": "error", "error": {"code": "unexpected_error"}}
-
-
-# ============================================================
-# PICK VIDEO
-# ============================================================
-
-def choose_media(picker):
-    if not isinstance(picker, list):
-        return None
-
-    for item in picker:
-        if isinstance(item, dict) and item.get("type") == "video" and item.get("url"):
-            return item
-
-    for item in picker:
-        if isinstance(item, dict) and item.get("type") == "gif" and item.get("url"):
-            return item
-
-    return None
-
-
-# ============================================================
-# DOWNLOAD FILE LOCALLY (fixes unreliable remote-URL upload)
+# HELPERS
 # ============================================================
 
 def safe_filename(name):
@@ -223,78 +102,155 @@ def safe_filename(name):
     return name[:150] or "video.mp4"
 
 
-async def download_to_temp(media_url, filename):
-    filename = safe_filename(filename)
-    tmp_dir = tempfile.mkdtemp(prefix="dl_")
-    file_path = os.path.join(tmp_dir, filename)
+def download_with_ytdlp(url, tmp_dir):
+    """
+    Downloads the video/audio using yt-dlp.
+    Returns the local file path on success, or None on failure.
+    """
+    outtmpl = os.path.join(tmp_dir, "%(title).150s.%(ext)s")
 
-    timeout = aiohttp.ClientTimeout(total=600, sock_read=120)
+    ydl_opts = {
+        "outtmpl": outtmpl,
+        "format": "bv*[height<=720]+ba/b[height<=720]/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "restrictfilenames": True,
+        "max_filesize": MAX_FILE_SIZE,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            )
+        },
+    }
 
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(media_url) as resp:
-                if resp.status != 200:
-                    print("Download failed, HTTP:", resp.status)
-                    return None
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info is None:
+                return None
+            file_path = ydl.prepare_filename(info)
 
-                with open(file_path, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(1024 * 256):
-                        f.write(chunk)
+            if not os.path.exists(file_path):
+                base, _ = os.path.splitext(file_path)
+                candidate = base + ".mp4"
+                if os.path.exists(candidate):
+                    file_path = candidate
 
-        return file_path
+            return file_path if os.path.exists(file_path) else None
 
+    except yt_dlp.utils.DownloadError as e:
+        print("yt-dlp DownloadError:", repr(e))
+        return None
     except Exception as e:
-        print("download_to_temp error:", repr(e))
+        print("yt-dlp unexpected error:", repr(e))
         return None
 
 
-def cleanup_temp(file_path):
-    if not file_path:
-        return
+def cleanup_temp(tmp_dir):
     try:
-        os.remove(file_path)
-        os.rmdir(os.path.dirname(file_path))
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     except Exception:
         pass
 
 
-# ============================================================
-# SEND MEDIA
-# ============================================================
+def is_terabox_url(url):
+    host = urllib.parse.urlparse(url).netloc.lower()
+    return any(domain in host for domain in TERABOX_DOMAINS)
 
-async def send_media(message, media_url, filename):
-    filename = safe_filename(filename)
 
-    local_path = await download_to_temp(media_url, filename)
+def download_terabox(url, tmp_dir):
+    """
+    Resolves a Terabox share link to a direct download link and downloads it.
+    Requires TERABOX_NDUS (the 'ndus' cookie from a logged-in browser session)
+    to be set, since Terabox's share API requires an authenticated session.
 
-    if not local_path:
-        return False
+    NOTE: Terabox does not publish or support this API for third-party use.
+    They change their internal endpoints often, so this can break at any time
+    and may violate Terabox's Terms of Service - use at your own risk.
+    """
+    if not TERABOX_NDUS:
+        print("Terabox download skipped: TERABOX_NDUS is not set")
+        return None
+
+    session = requests.Session()
+    session.cookies.set("ndus", TERABOX_NDUS, domain=".terabox.com")
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        )
+    })
 
     try:
-        try:
-            await message.reply_video(
-                video=local_path,
-                caption=filename,
-                supports_streaming=True
-            )
-            return True
+        resp = session.get(url, timeout=30, allow_redirects=True)
+        resp.raise_for_status()
+        final_url = resp.url
 
-        except Exception as e:
-            print("Video send failed:", repr(e))
+        parsed = urllib.parse.urlparse(final_url)
+        query = urllib.parse.parse_qs(parsed.query)
+        surl = query.get("surl", [None])[0]
 
-        try:
-            await message.reply_document(
-                document=local_path,
-                caption=filename
-            )
-            return True
+        if not surl:
+            match = re.search(r"surl=([^&]+)", resp.text)
+            if match:
+                surl = match.group(1)
 
-        except Exception as e:
-            print("Document send failed:", repr(e))
-            return False
+        if not surl:
+            print("Terabox: could not extract surl")
+            return None
 
-    finally:
-        cleanup_temp(local_path)
+        token_match = re.search(r"fn%28%22(.*?)%22%29", resp.text)
+        js_token = token_match.group(1) if token_match else None
+
+        if not js_token:
+            print("Terabox: could not extract jsToken")
+            return None
+
+        list_url = "https://www.terabox.com/share/list"
+        params = {
+            "app_id": "250528",
+            "web": "1",
+            "channel": "dubox",
+            "clienttype": "0",
+            "jsToken": js_token,
+            "shorturl": surl,
+            "root": "1",
+        }
+
+        list_resp = session.get(list_url, params=params, timeout=30)
+        data = list_resp.json()
+
+        file_list = data.get("list", [])
+        if not file_list:
+            print("Terabox: empty file list", data)
+            return None
+
+        file_info = file_list[0]
+        dlink = file_info.get("dlink")
+        filename = safe_filename(file_info.get("server_filename", "terabox_file"))
+
+        if not dlink:
+            print("Terabox: no dlink in response")
+            return None
+
+        file_path = os.path.join(tmp_dir, filename)
+        with session.get(dlink, stream=True, timeout=120) as dl:
+            dl.raise_for_status()
+            with open(file_path, "wb") as f:
+                for chunk in dl.iter_content(chunk_size=1024 * 256):
+                    if chunk:
+                        f.write(chunk)
+
+        return file_path if os.path.exists(file_path) else None
+
+    except Exception as e:
+        print("Terabox download error:", repr(e))
+        return None
 
 
 # ============================================================
@@ -308,73 +264,50 @@ async def download_handler(client, message):
     if not (url.startswith("http://") or url.startswith("https://")):
         return
 
-    status_message = await message.reply_text("🔎 লিংকটি পরীক্ষা করা হচ্ছে...")
+    status_message = await message.reply_text("🔎 লিংকটি প্রসেস করা হচ্ছে...")
+
+    tmp_dir = tempfile.mkdtemp(prefix="dl_")
 
     try:
-        data = await process_with_cobalt(url)
+        await status_message.edit_text("⬇️ ভিডিও ডাউনলোড হচ্ছে...")
 
-        if not isinstance(data, dict):
-            await status_message.edit_text("❌ Downloader থেকে সঠিক response পাওয়া যায়নি।")
+        if is_terabox_url(url):
+            file_path = download_terabox(url, tmp_dir)
+        else:
+            file_path = download_with_ytdlp(url, tmp_dir)
+
+        if not file_path:
+            await status_message.edit_text(
+                "❌ ভিডিওটি ডাউনলোড করা যায়নি।\n"
+                "লিংকটি public কিনা এবং সঠিক কিনা যাচাই করুন।"
+            )
             return
 
-        status = data.get("status")
-        print("Cobalt status:", status)
-
-        # ERROR
-        if status == "error":
-            await status_message.edit_text(format_api_error(data))
+        file_size = os.path.getsize(file_path)
+        if file_size > MAX_FILE_SIZE:
+            await status_message.edit_text(
+                "❌ ফাইলটি খুব বড় (Telegram limit-এর বাইরে)।"
+            )
             return
 
-        # TUNNEL / REDIRECT
-        if status in ("tunnel", "redirect"):
-            media_url = data.get("url")
-            filename = data.get("filename", "video.mp4")
+        await status_message.edit_text("📤 Telegram-এ আপলোড হচ্ছে...")
 
-            if not media_url:
-                await status_message.edit_text("❌ Download URL পাওয়া যায়নি।")
-                return
+        filename = safe_filename(os.path.basename(file_path))
 
-            await status_message.edit_text("⬇️ ভিডিও ডাউনলোড হচ্ছে...")
-            success = await send_media(message, media_url, filename)
+        try:
+            await message.reply_video(
+                video=file_path,
+                caption=filename,
+                supports_streaming=True,
+            )
+        except Exception as e:
+            print("Video send failed, trying as document:", repr(e))
+            await message.reply_document(document=file_path, caption=filename)
 
-            if success:
-                try:
-                    await status_message.delete()
-                except Exception:
-                    pass
-            else:
-                await status_message.edit_text("❌ Telegram-এ ফাইল পাঠানো যায়নি।")
-            return
-
-        # PICKER
-        if status == "picker":
-            picker = data.get("picker", [])
-            media = choose_media(picker)
-
-            if not media:
-                await status_message.edit_text("❌ কোনো ভিডিও পাওয়া যায়নি।")
-                return
-
-            media_url = media.get("url")
-
-            if not media_url:
-                await status_message.edit_text("❌ Media URL পাওয়া যায়নি।")
-                return
-
-            await status_message.edit_text("⬇️ ভিডিও ডাউনলোড হচ্ছে...")
-            success = await send_media(message, media_url, "video.mp4")
-
-            if success:
-                try:
-                    await status_message.delete()
-                except Exception:
-                    pass
-            else:
-                await status_message.edit_text("❌ Telegram-এ ফাইল পাঠানো যায়নি।")
-            return
-
-        # UNKNOWN
-        await status_message.edit_text("❌ Downloader থেকে অজানা response এসেছে।")
+        try:
+            await status_message.delete()
+        except Exception:
+            pass
 
     except Exception as e:
         print("Handler error:", repr(e))
@@ -384,6 +317,9 @@ async def download_handler(client, message):
             )
         except Exception:
             pass
+
+    finally:
+        cleanup_temp(tmp_dir)
 
 
 # ============================================================
