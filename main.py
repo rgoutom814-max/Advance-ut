@@ -1,75 +1,161 @@
 import os
 import asyncio
 import aiohttp
+
 from pyrogram import Client, filters
+from pyrogram.errors import RPCError
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-API_ID = int(os.environ.get("API_ID", "123456"))
-API_HASH = os.environ.get("API_HASH", "YOUR_API_HASH")
 
-app = Client("downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# ==========================================
+# CONFIG
+# ==========================================
 
-@app.on_message(filters.command("start"))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+
+# নিজের/অনুমোদিত Cobalt instance হলে এখানে তার URL দাও।
+# উদাহরণ: https://your-cobalt-instance.example
+COBALT_API = os.getenv(
+    "COBALT_API",
+    "https://api.cobalt.tools"
+).rstrip("/")
+
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is missing")
+
+if not API_ID:
+    raise RuntimeError("API_ID is missing")
+
+if not API_HASH:
+    raise RuntimeError("API_HASH is missing")
+
+try:
+    API_ID = int(API_ID)
+except ValueError:
+    raise RuntimeError("API_ID must be a number")
+
+
+# ==========================================
+# TELEGRAM
+# ==========================================
+
+app = Client(
+    "downloader_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
+
+
+# ==========================================
+# START
+# ==========================================
+
+@app.on_message(
+    filters.command("start") &
+    filters.private
+)
 async def start(client, message):
-    await message.reply_text("হ্যালো! আমাকে YouTube, Instagram বা Facebook-এর লিঙ্ক পাঠান।")
 
-@app.on_message(filters.text & filters.private & ~filters.me & ~filters.bot)
-async def download_video(client, message):
-    url = message.text.strip()
-    if not url.startswith("http"):
-        return
+    await message.reply_text(
+        "👋 হ্যালো!\n\n"
+        "একটি public video/media link পাঠান।\n"
+        "আমি সেটি প্রসেস করার চেষ্টা করব।"
+    )
 
-    msg = await message.reply_text("ডাউনলোড হচ্ছে, অপেক্ষা করুন...")
 
-    # TeraBox লিঙ্ক হ্যান্ডলিং
-    if any(domain in url for domain in ["terabox", "1024tera", "freeterabox", "teraboxapp"]):
-        terabox_api = f"https://terabox-dl.qtcloud.workers.dev/api/get-download?url={url}"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(terabox_api) as resp:
-                    data = await resp.json()
-                    if data.get("downloadLink"):
-                        await message.reply_video(video=data.get("downloadLink"), caption=data.get("fileName", "video.mp4"))
-                        await msg.delete()
-                    else:
-                        await msg.edit_text("TeraBox থেকে ফাইল পাওয়া যায়নি।")
-        except Exception as e:
-            await msg.edit_text(f"ত্রুটি: {str(e)}")
-        return
+# ==========================================
+# ERROR TEXT
+# ==========================================
 
-    # Cobalt API with proper headers for Instagram/Facebook/YouTube
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
-    payload = {
-        "url": url,
-        "videoQuality": "720",
-        "audioFormat": "mp3"
-    }
+def get_error_text(data):
+
+    error = data.get("error", {})
+
+    if isinstance(error, dict):
+        code = error.get("code", "unknown")
+        context = error.get("context", {})
+
+        if code == "error.api.rate_exceeded":
+            return "⏳ অনেক বেশি request হয়েছে। একটু পরে আবার চেষ্টা করুন।"
+
+        if code == "error.api.service.unsupported":
+            return "❌ এই platform বর্তমানে downloader-এ supported নয়।"
+
+        if code == "error.api.platform.unsupported":
+            return "❌ এই platform বর্তমানে supported নয়।"
+
+        if code == "error.api.auth.key.invalid":
+            return "❌ Downloader API key ভুল।"
+
+        if code == "error.api.capacity":
+            return "⏳ Downloader server এখন ব্যস্ত। পরে আবার চেষ্টা করুন।"
+
+        if code == "error.api.generic":
+            return "❌ Downloader server-এ সমস্যা হয়েছে।"
+
+        limit = context.get("limit")
+
+        if limit:
+            return (
+                f"❌ এই ভিডিওটি server limit-এর বাইরে। "
+                f"Limit: {limit}"
+            )
+
+        return f"❌ Download করা যায়নি।\nCode: {code}"
+
+    return "❌ Download করা যায়নি।"
+
+
+# ==========================================
+# SEND VIDEO
+# ==========================================
+
+async def send_media(message, url, filename=None):
+
+    caption = filename or "Downloaded video"
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://api.cobalt.tools/api/json", json=payload, headers=headers) as response:
-                res_data = await response.json()
-                
-                status = res_data.get("status")
-                if status in ["stream", "redirect"]:
-                    await message.reply_video(video=res_data.get("url"))
-                    await msg.delete()
-                elif status == "picker":
-                    picker_list = res_data.get("picker")
-                    if picker_list and len(picker_list) > 0:
-                        await message.reply_video(video=picker_list[0].get("url"))
-                        await msg.delete()
-                    else:
-                        await msg.edit_text("মিডিয়া ফাইল খুঁজে পাওয়া যায়নি।")
-                else:
-                    await msg.edit_text("এই লিঙ্কটি এই মুহূর্তে প্রসেস করা সম্ভব হচ্ছে না। অন্য লিঙ্ক দিয়ে চেষ্টা করুন।")
-    except Exception as e:
-        await msg.edit_text(f"ত্রুটি ঘটেছে: {str(e)}")
 
-if __name__ == "__main__":
-    app.run()
-                         
+        await message.reply_video(
+            video=url,
+            caption=caption[:1024],
+            supports_streaming=True
+        )
+
+        return True
+
+    except Exception as first_error:
+
+        print(
+            "Direct Telegram upload failed:",
+            repr(first_error)
+        )
+
+        # দ্বিতীয়বার document হিসেবে চেষ্টা
+        try:
+
+            await message.reply_document(
+                document=url,
+                caption=caption[:1024]
+            )
+
+            return True
+
+        except Exception as second_error:
+
+            print(
+                "Document upload failed:",
+                repr(second_error)
+            )
+
+            return False
+
+
+# ==========================================
+# COBALT
+# ==========================================
+
+async
