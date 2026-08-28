@@ -1,29 +1,27 @@
 import os
+import asyncio
+import threading
 import aiohttp
 
+from flask import Flask
 from pyrogram import Client, filters
-from pyrogram.errors import RPCError
 
 
 # ============================================================
-# ENVIRONMENT VARIABLES
+# ENVIRONMENT
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID_TEXT = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 
-# নিজের Cobalt instance হলে Render Environment Variable-এ
-# COBALT_API সেট করতে পারবে।
 COBALT_API = os.getenv(
     "COBALT_API",
     "https://api.cobalt.tools"
 ).rstrip("/")
 
+COBALT_API_KEY = os.getenv("COBALT_API_KEY")
 
-# ============================================================
-# CHECK ENVIRONMENT VARIABLES
-# ============================================================
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is missing")
@@ -41,6 +39,34 @@ except ValueError:
 
 
 # ============================================================
+# FLASK SERVER FOR RENDER
+# ============================================================
+
+web = Flask(__name__)
+
+
+@web.get("/")
+def home():
+    return "Telegram Downloader Bot is running."
+
+
+@web.get("/health")
+def health():
+    return "OK"
+
+
+def run_web_server():
+    port = int(os.getenv("PORT", "8080"))
+
+    web.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False
+    )
+
+
+# ============================================================
 # TELEGRAM CLIENT
 # ============================================================
 
@@ -53,7 +79,7 @@ app = Client(
 
 
 # ============================================================
-# /START
+# START
 # ============================================================
 
 @app.on_message(
@@ -62,17 +88,15 @@ app = Client(
 )
 async def start_command(client, message):
 
-    text = (
+    await message.reply_text(
         "👋 হ্যালো!\n\n"
         "একটি public video/media link পাঠান।\n"
         "আমি সেটি প্রসেস করার চেষ্টা করব।"
     )
 
-    await message.reply_text(text)
-
 
 # ============================================================
-# ERROR MESSAGE
+# COBALT ERROR
 # ============================================================
 
 def format_api_error(data):
@@ -120,20 +144,20 @@ def format_api_error(data):
             "❌ এই platform বর্তমানে supported নয়।"
         )
 
-    if code == "error.api.auth.key.invalid":
+    if code.startswith("error.api.auth"):
         return (
-            "❌ Downloader API authentication সমস্যা হয়েছে।"
+            "❌ Cobalt API authentication সমস্যা হয়েছে।"
         )
 
     if limit:
         return (
-            "❌ এই ভিডিওটি server-এর limit-এর বাইরে।\n"
+            "❌ ফাইলটি server-এর limit-এর বাইরে।\n"
             f"Limit: {limit}"
         )
 
     if service:
         return (
-            "❌ এই ভিডিওটি প্রসেস করা যায়নি।\n"
+            "❌ ভিডিওটি প্রসেস করা যায়নি।\n"
             f"Service: {service}\n"
             f"Error: {code}"
         )
@@ -156,26 +180,20 @@ async def process_with_cobalt(url):
         "User-Agent": "Telegram-Downloader-Bot"
     }
 
+    # নিজের Cobalt instance/API key থাকলে
+    if COBALT_API_KEY:
+        headers["Authorization"] = f"Api-Key {COBALT_API_KEY}"
+
     payload = {
         "url": url,
-
-        # ফোনের জন্য ভালো compatibility
-        "videoQuality": "1080",
-
-        # সাধারণ video + audio
+        "videoQuality": "720",
+        "audioFormat": "best",
         "downloadMode": "auto",
-
-        # YouTube-এর জন্য ফোন-compatible codec
         "youtubeVideoCodec": "h264",
-
-        # MP4 prefer
         "youtubeVideoContainer": "mp4",
-
-        # metadata রাখবে
         "disableMetadata": False,
-
-        # প্রয়োজন হলে Cobalt tunnel ব্যবহার করবে
-        "alwaysProxy": True
+        "alwaysProxy": True,
+        "filenameStyle": "pretty"
     }
 
     timeout = aiohttp.ClientTimeout(
@@ -185,111 +203,99 @@ async def process_with_cobalt(url):
         sock_read=120
     )
 
-    async with aiohttp.ClientSession(
-        timeout=timeout
-    ) as session:
+    try:
 
-        async with session.post(
-            f"{COBALT_API}/",
-            json=payload,
-            headers=headers
-        ) as response:
+        async with aiohttp.ClientSession(
+            timeout=timeout
+        ) as session:
 
-            response_text = await response.text()
+            async with session.post(
+                f"{COBALT_API}/",
+                json=payload,
+                headers=headers
+            ) as response:
 
-            print(
-                "Cobalt HTTP status:",
-                response.status
-            )
+                text = await response.text()
 
-            print(
-                "Cobalt response:",
-                response_text[:3000]
-            )
-
-            if response.status != 200:
-                return {
-                    "status": "error",
-                    "error": {
-                        "code": f"http_{response.status}"
-                    }
-                }
-
-            try:
-                data = await response.json(
-                    content_type=None
+                print(
+                    "Cobalt HTTP:",
+                    response.status
                 )
 
-            except Exception:
-                return {
-                    "status": "error",
-                    "error": {
-                        "code": "invalid_json_response"
+                print(
+                    "Cobalt response:",
+                    text[:2000]
+                )
+
+                if response.status != 200:
+                    return {
+                        "status": "error",
+                        "error": {
+                            "code": f"http_{response.status}"
+                        }
                     }
-                }
 
-            return data
+                try:
+                    return await response.json(
+                        content_type=None
+                    )
 
+                except Exception:
+                    return {
+                        "status": "error",
+                        "error": {
+                            "code": "invalid_json_response"
+                        }
+                    }
 
-# ============================================================
-# SEND MEDIA TO TELEGRAM
-# ============================================================
+    except asyncio.TimeoutError:
 
-async def send_to_telegram(
-    message,
-    media_url,
-    filename
-):
+        return {
+            "status": "error",
+            "error": {
+                "code": "request_timeout"
+            }
+        }
 
-    # প্রথমে video হিসেবে পাঠানোর চেষ্টা
-    try:
-
-        await message.reply_video(
-            video=media_url,
-            caption=filename[:1024],
-            supports_streaming=True
-        )
-
-        return True
-
-    except Exception as video_error:
+    except aiohttp.ClientError as e:
 
         print(
-            "reply_video failed:",
-            repr(video_error)
+            "Cobalt connection error:",
+            repr(e)
         )
 
+        return {
+            "status": "error",
+            "error": {
+                "code": "connection_error"
+            }
+        }
 
-    # video হিসেবে না হলে document হিসেবে চেষ্টা
-    try:
-
-        await message.reply_document(
-            document=media_url,
-            caption=filename[:1024]
-        )
-
-        return True
-
-    except Exception as document_error:
+    except Exception as e:
 
         print(
-            "reply_document failed:",
-            repr(document_error)
+            "Cobalt unexpected error:",
+            repr(e)
         )
 
-        return False
+        return {
+            "status": "error",
+            "error": {
+                "code": "unexpected_error"
+            }
+        }
 
 
 # ============================================================
-# PICK VIDEO FROM PICKER
+# PICK VIDEO
 # ============================================================
 
-def choose_video(picker):
+def choose_media(picker):
 
     if not isinstance(picker, list):
         return None
 
-    # প্রথমে video খুঁজবে
+    # আগে video
     for item in picker:
 
         if not isinstance(item, dict):
@@ -301,8 +307,7 @@ def choose_video(picker):
         ):
             return item
 
-
-    # video না থাকলে gif গ্রহণ
+    # তারপর gif
     for item in picker:
 
         if not isinstance(item, dict):
@@ -314,8 +319,60 @@ def choose_video(picker):
         ):
             return item
 
-
     return None
+
+
+# ============================================================
+# SEND MEDIA
+# ============================================================
+
+async def send_media(
+    message,
+    media_url,
+    filename
+):
+
+    filename = str(
+        filename or "video.mp4"
+    )[:200]
+
+    # Video হিসেবে
+    try:
+
+        await message.reply_video(
+            video=media_url,
+            caption=filename,
+            supports_streaming=True
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "Video send failed:",
+            repr(e)
+        )
+
+
+    # Document হিসেবে
+    try:
+
+        await message.reply_document(
+            document=media_url,
+            caption=filename
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "Document send failed:",
+            repr(e)
+        )
+
+        return False
 
 
 # ============================================================
@@ -334,40 +391,54 @@ async def download_handler(
 
     url = message.text.strip()
 
-    # URL না হলে কিছু করবে না
     if not (
         url.startswith("http://")
         or url.startswith("https://")
     ):
         return
 
-
     status_message = await message.reply_text(
         "🔎 লিংকটি পরীক্ষা করা হচ্ছে..."
     )
 
-
     try:
 
-        # ----------------------------------------------------
-        # Cobalt API
-        # ----------------------------------------------------
-
         data = await process_with_cobalt(url)
+
+        if not isinstance(data, dict):
+
+            await status_message.edit_text(
+                "❌ Downloader থেকে সঠিক response পাওয়া যায়নি।"
+            )
+
+            return
 
         status = data.get("status")
 
         print(
-            "Cobalt result status:",
+            "Cobalt status:",
             status
         )
 
 
         # ====================================================
-        # TUNNEL
+        # ERROR
         # ====================================================
 
-        if status == "tunnel":
+        if status == "error":
+
+            await status_message.edit_text(
+                format_api_error(data)
+            )
+
+            return
+
+
+        # ====================================================
+        # TUNNEL / REDIRECT
+        # ====================================================
+
+        if status in ("tunnel", "redirect"):
 
             media_url = data.get("url")
 
@@ -384,23 +455,128 @@ async def download_handler(
 
                 return
 
-
             await status_message.edit_text(
                 "📤 ভিডিও Telegram-এ পাঠানো হচ্ছে..."
             )
 
-
-            success = await send_to_telegram(
+            success = await send_media(
                 message,
                 media_url,
                 filename
             )
 
-
             if success:
 
-                await status_message.delete()
+                try:
+                    await status_message.delete()
+                except Exception:
+                    pass
 
             else:
 
-                await status_message.edit_text
+                await status_message.edit_text(
+                    "❌ Telegram-এ ফাইল পাঠানো যায়নি।"
+                )
+
+            return
+
+
+        # ====================================================
+        # PICKER
+        # ====================================================
+
+        if status == "picker":
+
+            picker = data.get(
+                "picker",
+                []
+            )
+
+            media = choose_media(picker)
+
+            if not media:
+
+                await status_message.edit_text(
+                    "❌ কোনো ভিডিও পাওয়া যায়নি।"
+                )
+
+                return
+
+            media_url = media.get("url")
+
+            if not media_url:
+
+                await status_message.edit_text(
+                    "❌ Media URL পাওয়া যায়নি।"
+                )
+
+                return
+
+            await status_message.edit_text(
+                "📤 ভিডিও Telegram-এ পাঠানো হচ্ছে..."
+            )
+
+            success = await send_media(
+                message,
+                media_url,
+                "video.mp4"
+            )
+
+            if success:
+
+                try:
+                    await status_message.delete()
+                except Exception:
+                    pass
+
+            else:
+
+                await status_message.edit_text(
+                    "❌ Telegram-এ ফাইল পাঠানো যায়নি।"
+                )
+
+            return
+
+
+        # ====================================================
+        # UNKNOWN RESPONSE
+        # ====================================================
+
+        await status_message.edit_text(
+            "❌ Downloader থেকে অজানা response এসেছে।"
+        )
+
+
+    except Exception as e:
+
+        print(
+            "Handler error:",
+            repr(e)
+        )
+
+        try:
+
+            await status_message.edit_text(
+                "❌ একটি সমস্যা হয়েছে।\n"
+                "কিছুক্ষণ পরে আবার চেষ্টা করুন।"
+            )
+
+        except Exception:
+            pass
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+
+    # Render-এর web service চালু রাখবে
+    threading.Thread(
+        target=run_web_server,
+        daemon=True
+    ).start()
+
+    print("Starting Telegram bot...")
+
+    app.run()
