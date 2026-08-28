@@ -1,34 +1,48 @@
 import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+import asyncio
+from pyrogram import Client, filters
+import yt_dlp
 
-# Render Web Service Keep-Alive Port
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is Live!")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+API_ID = int(os.environ.get("API_ID", "123456"))
+API_HASH = os.environ.get("API_HASH", "YOUR_API_HASH")
 
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    server.serve_forever()
+app = Client("downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Telegram Bot Handler
-TOKEN = os.environ.get("BOT_TOKEN")
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    await message.reply_text("হ্যালো! আমাকে যেকোনো ভিডিও বা ফাইলের লিঙ্ক পাঠান, আমি ডাউনলোড করে দেব।")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("হ্যালো! বট চালু হয়ে গেছে।")
+@app.on_message(filters.text & filters.private)
+async def download_video(client, message):
+    url = message.text
+    if not url.startswith("http"):
+        await message.reply_text("দয়া করে সঠিক লিঙ্ক পাঠান।")
+        return
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"আপনি পাঠিয়েছেন: {update.message.text}")
+    msg = await message.reply_text("ডাউনলোড শুরু হচ্ছে, একটু অপেক্ষা করুন...")
+    
+    ydl_opts = {
+        'format': 'best',
+        'outtmpl': 'downloads/%(title)s.%(ext)s',
+        'max_filesize': 2000000000,
+    }
 
-if __name__ == '__main__':
-    threading.Thread(target=run_web_server, daemon=True).start()
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-    app.run_polling()
-                                                      
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+
+        await msg.edit_text("টেলিগ্রামে আপলোড করা হচ্ছে...")
+        await message.reply_video(video=filename, caption=info.get('title', 'Video'))
+        
+        if os.path.exists(filename):
+            os.remove(filename)
+        await msg.delete()
+
+    except Exception as e:
+        await msg.edit_text(f"ত্রুটি ঘটেছে: {str(e)}")
+
+if __name__ == "__main__":
+    app.run()
+    
