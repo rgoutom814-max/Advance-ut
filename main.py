@@ -1,8 +1,10 @@
 import os
 import logging
 import asyncio
+import threading
 from pathlib import Path
 
+from flask import Flask
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -14,29 +16,24 @@ from telegram.ext import (
 import yt_dlp
 
 
-# ---------------------------------------------------------
+# =========================================================
 # CONFIG
-# ---------------------------------------------------------
+# =========================================================
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-COOKIES_FILE = "cookies.txt"
 DOWNLOAD_DIR = "downloads"
+COOKIES_FILE = "cookies.txt"
 
-# Render automatically provides PORT
 PORT = int(os.environ.get("PORT", 10000))
 
-# Put your Render URL in Environment Variables:
-# WEBHOOK_URL=https://advance-ut.onrender.com
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-
-WEBHOOK_PATH = "/telegram-webhook"
-
-Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
+Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
 
-# ---------------------------------------------------------
+# =========================================================
 # LOGGING
-# ---------------------------------------------------------
+# =========================================================
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -45,61 +42,136 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------
-# DOWNLOAD LOGIC
-# ---------------------------------------------------------
-def build_ydl_opts(output_path: str) -> dict:
+# =========================================================
+# RENDER WEB SERVER
+# =========================================================
+
+flask_app = Flask(__name__)
+
+
+@flask_app.route("/")
+def home():
+    return "Advance bot is running!"
+
+
+def run_flask():
+    flask_app.run(
+        host="0.0.0.0",
+        port=PORT,
+        use_reloader=False
+    )
+
+
+# =========================================================
+# YT-DLP OPTIONS
+# =========================================================
+
+def build_ydl_opts(output_path):
     opts = {
         "format": "best[ext=mp4]/best",
+
         "outtmpl": output_path,
-        "quiet": True,
-        "no_warnings": True,
+
         "noplaylist": True,
-        "retries": 3,
+
+        "quiet": False,
+
+        "no_warnings": False,
+
+        "retries": 10,
+
+        "fragment_retries": 10,
+
+        "file_access_retries": 5,
+
+        "socket_timeout": 30,
+
+        "continuedl": True,
+
+        "overwrites": True,
+
+        # YouTube-এর জন্য browser-এর মতো User-Agent
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 10; K) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Mobile Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+
+        "extractor_retries": 5,
+
+        "ignoreerrors": False,
     }
 
-    # Use cookies.txt only if it exists
-    if os.path.exists(COOKIES_FILE):
+    # cookies.txt থাকলে ব্যবহার করবে
+    if os.path.isfile(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
 
     return opts
 
 
-def download_video(url: str, file_id: str) -> str:
-    """Runs yt-dlp in a separate thread because yt-dlp is synchronous."""
+# =========================================================
+# DOWNLOAD
+# =========================================================
+
+def download_video(url, file_id):
 
     output_path = os.path.join(
         DOWNLOAD_DIR,
         f"{file_id}.%(ext)s"
     )
 
-    ydl_opts = build_ydl_opts(output_path)
+    opts = build_ydl_opts(output_path)
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+
+        info = ydl.extract_info(
+            url,
+            download=True
+        )
+
+        if not info:
+            raise Exception("ভিডিও পাওয়া যায়নি।")
+
         filename = ydl.prepare_filename(info)
 
-        return filename
+        # কিছু ক্ষেত্রে extension পরিবর্তন হতে পারে
+        if os.path.exists(filename):
+            return filename
+
+        base = os.path.splitext(filename)[0]
+
+        for ext in ["mp4", "webm", "mkv", "m4a"]:
+            test_file = base + "." + ext
+
+            if os.path.exists(test_file):
+                return test_file
+
+        raise Exception("ডাউনলোড হয়েছে কিন্তু ফাইল পাওয়া যাচ্ছে না।")
 
 
-# ---------------------------------------------------------
-# TELEGRAM HANDLERS
-# ---------------------------------------------------------
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+# =========================================================
+# /START
+# =========================================================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
         "👋 হ্যালো!\n\n"
-        "আমাকে YouTube বা Terabox লিংক পাঠান, "
-        "আমি ভিডিও ডাউনলোড করে দেব।"
+        "YouTube বা অন্য supported video link পাঠান।\n\n"
+        "⏳ আমি ভিডিও ডাউনলোড করে পাঠানোর চেষ্টা করব।"
     )
 
 
-async def handle_link(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+# =========================================================
+# LINK HANDLER
+# =========================================================
+
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     if not update.message or not update.message.text:
         return
 
@@ -110,21 +182,25 @@ async def handle_link(
         or url.startswith("https://")
     ):
         await update.message.reply_text(
-            "⚠️ একটা সঠিক লিংক পাঠান।"
+            "⚠️ দয়া করে একটি সঠিক ভিডিও লিংক পাঠান।"
         )
         return
 
-    status_msg = await update.message.reply_text(
-        "⏳ ডাউনলোড হচ্ছে, একটু অপেক্ষা করুন..."
+    status = await update.message.reply_text(
+        "⏳ ভিডিও চেক করছি..."
     )
 
     file_id = str(update.message.message_id)
 
     loop = asyncio.get_running_loop()
 
-    filepath = None
-
     try:
+
+        await status.edit_text(
+            "⏳ ভিডিও ডাউনলোড হচ্ছে...\n"
+            "একটু অপেক্ষা করুন।"
+        )
+
         filepath = await loop.run_in_executor(
             None,
             download_video,
@@ -132,88 +208,108 @@ async def handle_link(
             file_id
         )
 
-        await status_msg.edit_text(
-            "📤 আপলোড হচ্ছে..."
+        if not os.path.exists(filepath):
+            raise Exception("ভিডিও ফাইল পাওয়া যায়নি।")
+
+        filesize = os.path.getsize(filepath)
+
+        # Telegram bot-এর সাধারণ upload limit মাথায় রেখে
+        if filesize > 49 * 1024 * 1024:
+
+            await status.edit_text(
+                "❌ ভিডিওটি Telegram-এ পাঠানোর জন্য অনেক বড়।\n"
+                "ছোট ভিডিও দিয়ে চেষ্টা করুন।"
+            )
+
+            os.remove(filepath)
+            return
+
+        await status.edit_text(
+            "📤 ভিডিও Telegram-এ পাঠানো হচ্ছে..."
         )
 
         with open(filepath, "rb") as video_file:
+
             await update.message.reply_video(
                 video=video_file,
                 caption="✅ এখানে আপনার ভিডিও"
             )
 
-        await status_msg.delete()
+        await status.delete()
+
+        # ফাইল delete
+        if os.path.exists(filepath):
+            os.remove(filepath)
 
     except yt_dlp.utils.DownloadError as e:
 
-        err_text = str(e)
-
-        if "Sign in to confirm" in err_text:
-            await status_msg.edit_text(
-                "❌ YouTube বলছে এটা bot request মনে করছে।\n"
-                "এটা ঠিক করতে হলে সার্ভারে cookies.txt "
-                "ফাইল আপডেট করতে হবে।"
-            )
-        else:
-            await status_msg.edit_text(
-                f"❌ ডাউনলোড ব্যর্থ হয়েছে:\n"
-                f"{err_text[:300]}"
-            )
+        error = str(e)
 
         logger.error(
-            "Download error: %s",
-            err_text
+            "yt-dlp error: %s",
+            error
         )
+
+        if (
+            "Sign in" in error
+            or "bot" in error.lower()
+            or "reload" in error.lower()
+            or "confirm" in error.lower()
+        ):
+
+            await status.edit_text(
+                "❌ YouTube এই request-টি block করেছে।\n\n"
+                "কিছুক্ষণ পরে আবার চেষ্টা করুন।\n"
+                "প্রয়োজনে cookies.txt / YouTube authentication "
+                "configure করতে হবে।"
+            )
+
+        else:
+
+            await status.edit_text(
+                "❌ ভিডিও ডাউনলোড করা যায়নি।\n\n"
+                f"{error[:500]}"
+            )
 
     except Exception as e:
 
-        await status_msg.edit_text(
-            "❌ একটা সমস্যা হয়েছে, আবার চেষ্টা করুন।"
-        )
-
         logger.exception(
-            "Unexpected error: %s",
-            e
+            "Unexpected error"
         )
 
-    finally:
-        # Delete downloaded file after sending
-        if filepath and os.path.exists(filepath):
-            try:
-                os.remove(filepath)
-            except Exception:
-                logger.exception(
-                    "Could not delete file: %s",
-                    filepath
-                )
+        await status.edit_text(
+            "❌ সমস্যা হয়েছে:\n"
+            f"{str(e)[:500]}"
+        )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # MAIN
-# ---------------------------------------------------------
+# =========================================================
+
 def main():
 
     if not BOT_TOKEN:
+
         raise RuntimeError(
-            "BOT_TOKEN missing! "
-            "Render Dashboard → Environment → "
-            "add BOT_TOKEN"
+            "BOT_TOKEN পাওয়া যায়নি। "
+            "Render Environment Variables-এ BOT_TOKEN সেট করুন।"
         )
 
-    if not WEBHOOK_URL:
-        raise RuntimeError(
-            "WEBHOOK_URL missing! "
-            "Render Dashboard → Environment → "
-            "add WEBHOOK_URL"
-        )
+    # Render-এর জন্য web server
+    threading.Thread(
+        target=run_flask,
+        daemon=True
+    ).start()
 
+    # Telegram bot
     application = (
-        Application.builder()
+        Application
+        .builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # Handlers
     application.add_handler(
         CommandHandler("start", start)
     )
@@ -225,22 +321,15 @@ def main():
         )
     )
 
-    logger.info("Starting Telegram bot with webhook...")
+    logger.info(
+        "Advance bot started successfully!"
+    )
 
-    # -----------------------------------------------------
-    # WEBHOOK
-    # -----------------------------------------------------
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=WEBHOOK_PATH,
-        webhook_url=WEBHOOK_URL + WEBHOOK_PATH,
-        allowed_updates=Update.ALL_TYPES,
+    # WEBHOOK নয় — polling
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES
     )
 
 
-# ---------------------------------------------------------
-# START
-# ---------------------------------------------------------
 if __name__ == "__main__":
     main()
