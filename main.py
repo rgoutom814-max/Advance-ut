@@ -403,5 +403,4 @@ async def download_handler(
 
             else:
 
-                await status_message.edit_text(
-                    "❌
+                await status_message.edit_text
