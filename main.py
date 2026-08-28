@@ -11,13 +11,14 @@ app = Client("downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_T
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("হ্যালো! আমাকে YouTube, Terabox, Instagram বা Facebook-এর যেকোনো লিঙ্ক পাঠান, আমি ভিডিও নামিয়ে দেব।")
+    await message.reply_text("হ্যালো! আমাকে YouTube, Terabox, Instagram বা Facebook-এর যেকোনো সঠিক লিঙ্ক পাঠান, আমি ভিডিও নামিয়ে দেব।")
 
-@app.on_message(filters.text & filters.private)
+@app.on_message(filters.text & filters.private & ~filters.me & ~filters.bot)
 async def download_video(client, message):
     url = message.text.strip()
+    
+    # লিঙ্ক http দিয়ে শুরু না হলে বট কোনো রিপ্লাই বা লুপ তৈরি করবে না, সাইলেন্ট থাকবে
     if not url.startswith("http"):
-        await message.reply_text("দয়া করে সঠিক লিঙ্ক পাঠান।")
         return
 
     msg = await message.reply_text("ডাউনলোড প্রসেস হচ্ছে, একটু অপেক্ষা করুন...")
@@ -36,7 +37,7 @@ async def download_video(client, message):
                         await message.reply_video(video=file_url, caption=file_name)
                         await msg.delete()
                     else:
-                        await msg.edit_text("TeraBox লিঙ্ক থেকে ফাইল প্রসেস করা যায়নি।")
+                        await msg.edit_text("TeraBox লিঙ্ক থেকে ফাইল পাওয়া যায়নি। সঠিক লিঙ্ক দিন।")
         except Exception as e:
             await msg.edit_text(f"TeraBox ডাউনলোডে সমস্যা: {str(e)}")
         return
@@ -67,7 +68,7 @@ async def download_video(client, message):
                     await message.reply_video(video=video_url)
                     await msg.delete()
                 else:
-                    await msg.edit_text("ভিডিওটি প্রসেস করা যায়নি, আবার চেষ্টা করুন।")
+                    await msg.edit_text("ভিডিওটি প্রসেস করা যায়নি, অন্য লিঙ্ক দিয়ে চেষ্টা করুন।")
 
     except Exception as e:
         await msg.edit_text(f"ত্রুটি ঘটেছে: {str(e)}")
