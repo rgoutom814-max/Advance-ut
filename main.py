@@ -26,6 +26,11 @@ async def download_video(client, message):
         'format': 'best',
         'outtmpl': 'downloads/%(title)s.%(ext)s',
         'max_filesize': 2000000000,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web']
+            }
+        }
     }
 
     try:
