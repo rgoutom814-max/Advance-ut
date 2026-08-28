@@ -22,3 +22,9 @@ DOWNLOAD_RETRIES = 3
 
 # --- Supported platforms (shown in /help) ---
 SUPPORTED_SITES = ["YouTube", "Terabox", "Facebook", "Instagram", "Twitter / X"]
+
+# --- Force Subscribe ---
+# Your channel's public username, without the @ symbol
+# Example: if your channel is https://t.me/mychannel, set CHANNEL_USERNAME = "mychannel"
+CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "")
+FORCE_SUB_ENABLED = bool(CHANNEL_USERNAME)
