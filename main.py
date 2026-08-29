@@ -66,7 +66,7 @@ def welcome_keyboard() -> InlineKeyboardMarkup:
 
 WELCOME_TEXT = (
     "👋 *স্বাগতম!*\n\n"
-    "আমাকে যেকোনো YouTube লিংক পাঠান, আমি কোয়ালিটি অপশন দেখাব।\n\n"
+    "আমাকে যেকোনো YouTube লিংক পাঠান, আমি ভিডিও ডাউনলোড করে দেব।\n\n"
     "শুধু লিংকটা paste করুন, বাকিটা আমি করে দেব ⬇️"
 )
 
@@ -80,6 +80,7 @@ HELP_TEXT_TEMPLATE = (
 # FORCE-SUBSCRIBE GATE
 # ---------------------------------------------------------
 async def require_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Returns True if user can proceed, otherwise shows the join-channel prompt."""
     if not config.FORCE_SUB_ENABLED:
         return True
 
@@ -124,6 +125,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles inline button taps."""
     query = update.callback_query
     await query.answer()
 
@@ -156,7 +158,9 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Best case: we've already sent this exact video to Telegram before.
-    # Reuse Telegram's own file_id instead of looking up quality options again.
+    # Reuse Telegram's own file_id — this sends a tiny reference instead of
+    # re-downloading from YouTube and re-uploading the whole file, which is
+    # what actually costs Render bandwidth.
     tg_file_id = utils.get_cached_file_id(url)
     if tg_file_id:
         try:
@@ -204,6 +208,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await status_msg.delete()
 
+    # Show the video's own thumbnail + title (from the same metadata call
+    # above — no extra bandwidth) alongside the quality buttons. Plain text
+    # (no Markdown) since video titles often contain characters that would
+    # break Markdown parsing.
     caption_text = f"🎬 {title}\n\nকোয়ালিটি বেছে নিন:"
     if thumbnail:
         try:
@@ -226,10 +234,13 @@ async def quality_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     _, short_id, quality = query.data.split(":", 2)
     url = utils.get_pending_url(short_id)
 
+    # The message this button is attached to is a photo (thumbnail) message,
+    # so we must edit its caption, not its text.
     async def update_status(text: str):
         try:
             await query.message.edit_caption(caption=text)
         except Exception:
+            # Fallback in case it was ever a plain text message (no thumbnail)
             await query.message.edit_text(text)
 
     if not url:
@@ -240,10 +251,6 @@ async def quality_button_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     loop = asyncio.get_running_loop()
     try:
-        # We only fetch the direct stream URL — the video is never saved to
-        # this bot's own disk. reply_video(video=direct_url) hands the URL
-        # to Telegram, and Telegram's own servers fetch + deliver it. That's
-        # what keeps this fast and avoids the bot getting stuck waiting.
         direct_url = await loop.run_in_executor(
             None, utils.get_direct_url_for_quality, url, quality
         )
