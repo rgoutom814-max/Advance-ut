@@ -17,8 +17,9 @@ def build_ydl_opts(output_path: str) -> dict:
     opts = {
         "format": config.FORMAT_PRIORITY,
         "outtmpl": output_path,
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": False,
+        "no_warnings": False,
+        "verbose": True,
         "noplaylist": True,
         "retries": config.DOWNLOAD_RETRIES,
         "sleep_interval_requests": config.SLEEP_BETWEEN_REQUESTS,
