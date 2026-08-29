@@ -20,4 +20,10 @@ SUPPORTED_SITES = ["YouTube", "Facebook", "Instagram", "Twitter / X"]
 # Your channel's public username, without the @ symbol
 # Example: if your channel is https://t.me/mychannel, set CHANNEL_USERNAME = "mychannel"
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "")
-FORCE_SUB_ENABLED = bool(CHANNEL_USERNAME)
+FORCE_SUB_ENABLED = bool(CHANNEL_USERNAME)BASE_URL = os.getenv(
+    "BASE_URL",
+    os.getenv(
+        "RENDER_EXTERNAL_URL",
+        ""
+    )
+)
