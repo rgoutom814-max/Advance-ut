@@ -16,10 +16,9 @@ MAX_FILE_SIZE_MB = 50
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # --- Download behavior ---
-# Try mp4 combined video+audio first, then fall back to any best combined
-# stream, then finally let yt-dlp merge best video+audio if nothing combined
-# exists. Avoids "Requested format is not available" on android client.
-FORMAT_PRIORITY = "best[ext=mp4]/best/bestvideo+bestaudio"
+# Simplest possible fallback chain — "best" alone almost always matches
+# a pre-merged format, so we don't depend on ffmpeg being installed.
+FORMAT_PRIORITY = "best"
 SLEEP_BETWEEN_REQUESTS = 2  # seconds, helps avoid YouTube bot-detection
 DOWNLOAD_RETRIES = 3
 
