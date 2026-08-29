@@ -21,6 +21,14 @@ def build_ydl_opts(output_path: str) -> dict:
         "noplaylist": True,
         "retries": config.DOWNLOAD_RETRIES,
         "sleep_interval_requests": config.SLEEP_BETWEEN_REQUESTS,
+        # Use the "android" player client instead of "web" — this avoids
+        # YouTube's newer PO-Token / "page needs to be reloaded" check that
+        # the default web client currently triggers.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+            }
+        },
     }
     if os.path.exists(config.COOKIES_FILE):
         opts["cookiefile"] = config.COOKIES_FILE
