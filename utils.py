@@ -79,8 +79,7 @@ def cache_file(url: str, filepath: str):
 
 def check_file_size(filepath: str) -> bool:
     """Returns True if file is within Telegram's upload limit."""
-    size = os.path.getsize(filepath)
-    return size <= config.MAX_FILE_SIZE_BYTES
+    return os.path.getsize(filepath) <= config.MAX_FILE_SIZE_BYTES
 
 
 def get_direct_stream_url(url: str):
