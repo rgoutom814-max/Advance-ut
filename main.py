@@ -3,36 +3,16 @@ import logging
 import asyncio
 import threading
 
-_BIN_DIR = os.path.join(
-    os.path.dirname(
-        os.path.abspath(__file__)
-    ),
-    "bin"
-)
+_BIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+os.environ["PATH"] = _BIN_DIR + os.pathsep + os.environ.get("PATH", "")
 
-os.environ["PATH"] = (
-    _BIN_DIR
-    + os.pathsep
-    + os.environ.get("PATH", "")
-)
-
-
-from flask import (
-    Flask,
-    redirect,
-    abort,
-)
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-
+from flask import Flask
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -40,654 +20,244 @@ from telegram.ext import (
 import config
 import utils
 
-
-# ---------------------------------------------------------
-# LOGGING
-# ---------------------------------------------------------
-
 logging.basicConfig(
-    format=(
-        "%(asctime)s - "
-        "%(name)s - "
-        "%(levelname)s - "
-        "%(message)s"
-    ),
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
-
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------
-# FLASK
-# ---------------------------------------------------------
 
 flask_app = Flask(__name__)
 
-
 @flask_app.route("/")
 def home():
-
-    return "⚡ Fast Downloader Bot is running!"
-
-
-@flask_app.route("/health")
-def health():
-
-    return "OK"
-
-
-# ---------------------------------------------------------
-# DIRECT DOWNLOAD ENDPOINT
-# ---------------------------------------------------------
-
-@flask_app.route(
-    "/download/<short_id>/<quality>"
-)
-def direct_download(
-    short_id,
-    quality
-):
-
-    allowed = {
-        "360p",
-        "480p",
-        "720p",
-        "1080p",
-        "audio"
-    }
-
-    if quality not in allowed:
-        abort(404)
-
-    url = utils.get_pending_url(
-        short_id
-    )
-
-    if not url:
-        return (
-            "❌ Link expired. "
-            "Please send the YouTube link again.",
-            404
-        )
-
-    try:
-
-        direct_url = (
-            utils.get_direct_url_for_quality(
-                url,
-                quality
-            )
-        )
-
-        if not direct_url:
-            return (
-                "❌ This quality is not available.",
-                404
-            )
-
-        # -----------------------------------------
-        # IMPORTANT:
-        # Render DOES NOT download the video.
-        #
-        # Browser gets redirected directly to
-        # YouTube CDN.
-        # -----------------------------------------
-
-        return redirect(
-            direct_url,
-            code=302
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            "Direct download failed: %s",
-            e
-        )
-
-        return (
-            "❌ Download link তৈরি করা যায়নি।",
-            500
-        )
-
+    return "Bot is alive!"
 
 def run_flask():
-
-    flask_app.run(
-        host="0.0.0.0",
-        port=config.PORT,
-        threaded=True
-    )
-
-
-# ---------------------------------------------------------
-# KEYBOARDS
-# ---------------------------------------------------------
+    flask_app.run(host="0.0.0.0", port=config.PORT)
 
 def join_channel_keyboard():
-
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📢 চ্যানেলে জয়েন করুন",
-                url=(
-                    f"https://t.me/"
-                    f"{config.CHANNEL_USERNAME}"
-                )
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "✅ জয়েন করেছি",
-                callback_data="check_sub"
-            )
-        ]
+        [InlineKeyboardButton("📢 চ্যানেলে জয়েন করুন", url=f"https://t.me/{config.CHANNEL_USERNAME}")],
+        [InlineKeyboardButton("✅ জয়েন করেছি, আবার চেষ্টা করুন", callback_data="check_sub")],
     ])
 
-
 def welcome_keyboard():
-
-    buttons = [
-        [
-            InlineKeyboardButton(
-                "ℹ️ Supported Sites",
-                callback_data="show_help"
-            )
-        ]
-    ]
-
+    buttons = [[InlineKeyboardButton("ℹ️ সাপোর্টেড সাইট", callback_data="show_help")]]
     if config.FORCE_SUB_ENABLED:
-
-        buttons.append([
-            InlineKeyboardButton(
-                "📢 আমাদের চ্যানেল",
-                url=(
-                    f"https://t.me/"
-                    f"{config.CHANNEL_USERNAME}"
-                )
-            )
-        ])
-
-    return InlineKeyboardMarkup(
-        buttons
-    )
-
-
-# ---------------------------------------------------------
-# TEXT
-# ---------------------------------------------------------
+        buttons.append([InlineKeyboardButton("📢 আমাদের চ্যানেল", url=f"https://t.me/{config.CHANNEL_USERNAME}")])
+    return InlineKeyboardMarkup(buttons)
 
 WELCOME_TEXT = (
     "👋 *স্বাগতম!*\n\n"
-    "আমাকে YouTube লিংক পাঠান।\n\n"
-    "আমি আপনাকে সরাসরি "
-    "⚡ Download Link দেব।"
+    "আমাকে যেকোনো YouTube লিংক পাঠান, আমি ভিডিও ডাউনলোড করে দেব।\n\n"
+    "শুধু লিংকটা paste করুন, বাকিটা আমি করে দেব ⬇️"
 )
-
 
 HELP_TEXT_TEMPLATE = (
-    "📋 *Supported Sites:*\n"
-    "{sites}\n\n"
-    "শুধু নিজের বা download-permitted "
-    "কন্টেন্টের জন্য ব্যবহার করুন।"
+    "📋 *সাপোর্টেড সাইট:*\n{sites}\n\n"
+    "শুধু নিজের বা download-permitted কন্টেন্টের জন্য ব্যবহার করুন।"
 )
 
-
-# ---------------------------------------------------------
-# SUBSCRIPTION
-# ---------------------------------------------------------
-
-async def require_subscription(
-    update,
-    context
-):
-
+async def require_subscription(update, context):
     if not config.FORCE_SUB_ENABLED:
         return True
-
-    user_id = (
-        update.effective_user.id
-    )
-
-    if await utils.is_subscribed(
-        context.bot,
-        user_id
-    ):
+    user_id = update.effective_user.id
+    if await utils.is_subscribed(context.bot, user_id):
         return True
-
     text = (
-        "🔒 আগে আমাদের চ্যানেলে "
-        "জয়েন করুন।\n\n"
-        "তারপর আবার চেষ্টা করুন।"
+        "🔒 বট ব্যবহার করতে হলে আগে আমাদের চ্যানেলে জয়েন করতে হবে।\n\n"
+        "নিচের বাটনে চ্যানেলে জয়েন করে, তারপর *\"জয়েন করেছি\"* বাটনে চাপুন।"
     )
-
     if update.callback_query:
-
-        await (
-            update.callback_query
-            .message
-            .edit_text(
-                text,
-                reply_markup=(
-                    join_channel_keyboard()
-                )
-            )
+        await update.callback_query.message.edit_text(
+            text, reply_markup=join_channel_keyboard(), parse_mode="Markdown"
         )
-
-    elif update.message:
-
+    else:
         await update.message.reply_text(
-            text,
-            reply_markup=(
-                join_channel_keyboard()
-            )
+            text, reply_markup=join_channel_keyboard(), parse_mode="Markdown"
         )
-
     return False
 
-
-# ---------------------------------------------------------
-# START
-# ---------------------------------------------------------
-
-async def start(
-    update,
-    context
-):
-
-    if not await require_subscription(
-        update,
-        context
-    ):
+async def start(update, context):
+    if not await require_subscription(update, context):
         return
-
     await update.message.reply_text(
-        WELCOME_TEXT,
-        reply_markup=welcome_keyboard(),
-        parse_mode="Markdown"
+        WELCOME_TEXT, reply_markup=welcome_keyboard(), parse_mode="Markdown"
     )
 
-
-# ---------------------------------------------------------
-# HELP
-# ---------------------------------------------------------
-
-async def help_command(
-    update,
-    context
-):
-
-    if not await require_subscription(
-        update,
-        context
-    ):
+async def help_command(update, context):
+    if not await require_subscription(update, context):
         return
-
-    sites = "\n".join(
-        f"• {s}"
-        for s in config.SUPPORTED_SITES
-    )
-
+    sites = "\n".join(f"• {s}" for s in config.SUPPORTED_SITES)
     await update.message.reply_text(
-        HELP_TEXT_TEMPLATE.format(
-            sites=sites
-        ),
-        parse_mode="Markdown"
+        HELP_TEXT_TEMPLATE.format(sites=sites), parse_mode="Markdown"
     )
 
-
-# ---------------------------------------------------------
-# NORMAL BUTTONS
-# ---------------------------------------------------------
-
-async def button_handler(
-    update,
-    context
-):
-
+async def button_handler(update, context):
     query = update.callback_query
-
     await query.answer()
-
     if query.data == "check_sub":
-
-        if await utils.is_subscribed(
-            context.bot,
-            update.effective_user.id
-        ):
-
+        if await utils.is_subscribed(context.bot, update.effective_user.id):
             await query.message.edit_text(
-                WELCOME_TEXT,
-                reply_markup=welcome_keyboard(),
-                parse_mode="Markdown"
+                WELCOME_TEXT, reply_markup=welcome_keyboard(), parse_mode="Markdown"
             )
-
         else:
-
-            await query.answer(
-                "❌ এখনো জয়েন করেননি!",
-                show_alert=True
-            )
-
-        return
-
-    if query.data == "show_help":
-
-        if not await require_subscription(
-            update,
-            context
-        ):
+            await query.answer("❌ এখনো জয়েন করেননি!", show_alert=True)
+    elif query.data == "show_help":
+        if not await require_subscription(update, context):
             return
-
-        sites = "\n".join(
-            f"• {s}"
-            for s in config.SUPPORTED_SITES
-        )
-
+        sites = "\n".join(f"• {s}" for s in config.SUPPORTED_SITES)
         await query.message.edit_text(
-            HELP_TEXT_TEMPLATE.format(
-                sites=sites
-            ),
-            parse_mode="Markdown"
+            HELP_TEXT_TEMPLATE.format(sites=sites), parse_mode="Markdown"
         )
 
-
-# ---------------------------------------------------------
-# YOUTUBE LINK
-# ---------------------------------------------------------
-
-async def handle_link(
-    update,
-    context
-):
-
-    if not await require_subscription(
-        update,
-        context
-    ):
-        return
-
-    if not update.message:
+async def handle_link(update, context):
+    if not await require_subscription(update, context):
         return
 
     url = update.message.text.strip()
 
-    if not (
-        url.startswith("http://")
-        or url.startswith("https://")
-    ):
-
-        await update.message.reply_text(
-            "⚠️ সঠিক YouTube লিংক পাঠান।"
-        )
-
+    if not (url.startswith("http://") or url.startswith("https://")):
+        await update.message.reply_text("⚠️ একটা সঠিক লিংক পাঠান।")
         return
 
-    status = await update.message.reply_text(
-        "⚡ ভিডিওর তথ্য নেওয়া হচ্ছে..."
-    )
+    tg_file_id = utils.get_cached_file_id(url)
+    if tg_file_id:
+        try:
+            await update.message.reply_video(
+                video=tg_file_id, caption="✅ এখানে আপনার ভিডিও"
+            )
+            return
+        except Exception as e:
+            logger.warning("Cached file_id failed, continuing normally: %s", e)
 
+    status_msg = await update.message.reply_text("🔍 কোয়ালিটি খুঁজছি...")
     loop = asyncio.get_running_loop()
 
     try:
-
-        info = await loop.run_in_executor(
-            None,
-            utils.list_quality_options,
-            url
-        )
-
+        info = await loop.run_in_executor(None, utils.list_quality_options, url)
     except Exception as e:
-
-        logger.exception(
-            "Metadata error: %s",
-            e
+        logger.info("Quality lookup failed: %s", e)
+        await status_msg.edit_text(
+            "❌ এই লিংকটা থেকে তথ্য আনা যায়নি, লিংকটা সঠিক কিনা দেখুন।"
         )
-
-        await status.edit_text(
-            "❌ ভিডিওর তথ্য পাওয়া যায়নি।"
-        )
-
         return
 
     qualities = info["qualities"]
-
     title = info["title"]
-
     thumbnail = info["thumbnail"]
 
-    available = [
-        q
-        for q, ok in qualities.items()
-        if ok
-    ]
-
+    available = [q for q, ok in qualities.items() if ok]
     if not available:
-
-        await status.edit_text(
-            "❌ কোনো compatible quality পাওয়া যায়নি।"
+        await status_msg.edit_text(
+            "❌ এই ভিডিওটা এই মুহূর্তে সরাসরি পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।"
         )
-
         return
 
-    # -----------------------------------------------------
-    # CREATE SHORT ID
-    # -----------------------------------------------------
+    short_id = utils.store_pending_url(url)
 
-    short_id = utils.store_pending_url(
-        url
-    )
-
-    # -----------------------------------------------------
-    # GET PUBLIC BASE URL
-    # -----------------------------------------------------
-
-    base_url = os.environ.get(
-        "RENDER_EXTERNAL_URL"
-    )
-
-    if not base_url:
-
-        base_url = getattr(
-            config,
-            "BASE_URL",
-            ""
-        )
-
-    base_url = base_url.rstrip("/")
-
-    if not base_url:
-
-        await status.edit_text(
-            "❌ Server BASE_URL সেট করা নেই।"
-        )
-
-        logger.error(
-            "RENDER_EXTERNAL_URL / BASE_URL missing"
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # BUTTONS
-    # -----------------------------------------------------
-
-    rows = []
-
-    current_row = []
-
-    for height in utils.QUALITY_HEIGHTS:
-
-        quality = f"{height}p"
-
-        if quality not in available:
-            continue
-
-        download_url = (
-            f"{base_url}/download/"
-            f"{short_id}/{quality}"
-        )
-
-        current_row.append(
-            InlineKeyboardButton(
-                f"⚡ {quality} Download",
-                url=download_url
-            )
-        )
-
-        if len(current_row) == 2:
-
-            rows.append(
-                current_row
-            )
-
-            current_row = []
-
+    ordered = [f"{h}p" for h in utils.QUALITY_HEIGHTS if f"{h}p" in available]
     if "audio" in available:
+        ordered.append("audio")
 
-        audio_url = (
-            f"{base_url}/download/"
-            f"{short_id}/audio"
-        )
+    labels = {q: ("🎵 Audio" if q == "audio" else f"🎬 {q}") for q in ordered}
+    buttons = [
+        InlineKeyboardButton(labels[q], callback_data=f"dl:{short_id}:{q}")
+        for q in ordered
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
-        current_row.append(
-            InlineKeyboardButton(
-                "🎵 Audio Download",
-                url=audio_url
-            )
-        )
+    await status_msg.delete()
 
-    if current_row:
-        rows.append(
-            current_row
-        )
-
-    keyboard = InlineKeyboardMarkup(
-        rows
-    )
-
-    # -----------------------------------------------------
-    # DELETE STATUS
-    # -----------------------------------------------------
-
-    try:
-        await status.delete()
-    except Exception:
-        pass
-
-    # -----------------------------------------------------
-    # CAPTION
-    # -----------------------------------------------------
-
-    caption = (
-        f"🎬 {title}\n\n"
-        "⚡ নিচের quality বেছে নিন:\n\n"
-        "📥 Download চাপলে সরাসরি "
-        "download শুরু হবে।"
-    )
-
-    # -----------------------------------------------------
-    # SEND THUMBNAIL
-    # -----------------------------------------------------
-
+    caption_text = f"🎬 {title}\n\nকোয়ালিটি বেছে নিন:"
     if thumbnail:
-
         try:
-
             await update.message.reply_photo(
                 photo=thumbnail,
-                caption=caption[:1024],
-                reply_markup=keyboard
+                caption=caption_text[:1024],
+                reply_markup=InlineKeyboardMarkup(rows),
             )
-
             return
-
         except Exception as e:
-
-            logger.info(
-                "Thumbnail failed: %s",
-                e
-            )
-
-    # -----------------------------------------------------
-    # TEXT FALLBACK
-    # -----------------------------------------------------
+            logger.info("Thumbnail send failed, falling back to text: %s", e)
 
     await update.message.reply_text(
-        caption,
-        reply_markup=keyboard
+        caption_text, reply_markup=InlineKeyboardMarkup(rows)
     )
 
+async def quality_button_handler(update, context):
+    query = update.callback_query
+    await query.answer()
 
-# ---------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------
+    _, short_id, quality = query.data.split(":", 2)
+    url = utils.get_pending_url(short_id)
+
+    async def update_status(text):
+        try:
+            await query.message.edit_caption(caption=text)
+        except Exception:
+            try:
+                await query.message.edit_text(text)
+            except Exception:
+                pass
+
+    if not url:
+        await update_status("❌ লিংকটা মেয়াদোত্তীর্ণ হয়ে গেছে, আবার পাঠান।")
+        return
+
+    await update_status(f"⏳ {quality} পাঠানো হচ্ছে...")
+
+    loop = asyncio.get_running_loop()
+    try:
+        direct_url = await loop.run_in_executor(
+            None, utils.get_direct_url_for_quality, url, quality
+        )
+        if not direct_url:
+            await update_status(
+                f"❌ {quality}-তে এই মুহূর্তে পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।"
+            )
+            return
+
+        if quality == "audio":
+            sent = await query.message.reply_audio(
+                audio=direct_url, caption="✅ এখানে আপনার অডিও"
+            )
+            if sent.audio:
+                utils.cache_file_id(url, sent.audio.file_id)
+        else:
+            sent = await query.message.reply_video(
+                video=direct_url, caption="✅ এখানে আপনার ভিডিও"
+            )
+            if sent.video:
+                utils.cache_file_id(url, sent.video.file_id)
+
+        await query.message.delete()
+
+    except Exception as e:
+        logger.info("Quality-specific send failed: %s", e)
+        await update_status("❌ এই মুহূর্তে পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।")
 
 def main():
-
     if not config.BOT_TOKEN:
-
         raise RuntimeError(
-            "BOT_TOKEN missing!"
+            "BOT_TOKEN missing! Render dashboard -> Environment -> add BOT_TOKEN"
         )
 
-    # Flask
-    threading.Thread(
-        target=run_flask,
-        daemon=True
-    ).start()
+    threading.Thread(target=run_flask, daemon=True).start()
 
-    # Telegram
-    application = (
-        Application
-        .builder()
-        .token(config.BOT_TOKEN)
-        .concurrent_updates(True)
-        .build()
-    )
+    application = Application.builder().token(config.BOT_TOKEN).build()
 
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CallbackQueryHandler(quality_button_handler, pattern=r"^dl:"))
+    application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link)
     )
 
-    application.add_handler(
-        CommandHandler(
-            "help",
-            help_command
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND,
-            handle_link
-        )
-    )
-
-    application.add_handler(
-        __import__(
-            "telegram.ext",
-            fromlist=[
-                "CallbackQueryHandler"
-            ]
-        ).CallbackQueryHandler(
-            button_handler
-        )
-    )
-
-    logger.info(
-        "⚡ FAST DIRECT DOWNLOAD BOT STARTED"
-    )
-
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES
-    )
-
+    logger.info("Bot is starting...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
+            
