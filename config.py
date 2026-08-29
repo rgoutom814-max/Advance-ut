@@ -3,6 +3,10 @@ import os
 # --- Telegram ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
+# --- RapidAPI (YouTube Media Downloader) ---
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
+RAPIDAPI_HOST = "youtube-media-downloader.p.rapidapi.com"
+
 # --- Server ---
 PORT = int(os.environ.get("PORT", 10000))
 
