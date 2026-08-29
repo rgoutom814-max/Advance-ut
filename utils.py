@@ -1,94 +1,182 @@
 import os
 import logging
-import yt_dlp
+import time
+import threading
+from functools import lru_cache
 
+import yt_dlp
 import config
 
 logger = logging.getLogger(__name__)
 
-# Telegram file_id cache: {url: file_id} — once a video has been sent to
-# Telegram once, Telegram keeps its own copy. Reusing the file_id for the
-# next request of the same URL means we send a tiny text reference instead
-# of re-downloading from YouTube and re-uploading the whole file, which is
-# what actually costs Render bandwidth. This cache has no TTL since
-# Telegram file_ids for content a bot uploaded remain valid indefinitely.
+# ---------------------------------------------------------
+# CACHE
+# ---------------------------------------------------------
+
+# Telegram file cache:
+# (video_url, quality) -> telegram file_id
 _file_id_cache = {}
 
-
-def get_cached_file_id(url: str):
-    return _file_id_cache.get(url)
-
-
-def cache_file_id(url: str, file_id: str):
-    _file_id_cache[url] = file_id
-
-
-# Short-lived mapping so inline-button callback_data (max 64 bytes) can
-# reference a full URL without embedding it directly.
+# Pending button URLs:
+# short_id -> (url, created_time)
 _pending_urls = {}
+
+# Metadata cache:
+# url -> (timestamp, info)
+_metadata_cache = {}
+
+_cache_lock = threading.Lock()
+
+PENDING_TTL = 30 * 60       # 30 minutes
+METADATA_TTL = 5 * 60       # 5 minutes
+
+
+def get_cached_file_id(url: str, quality=None):
+    key = (url, quality or "default")
+    with _cache_lock:
+        return _file_id_cache.get(key)
+
+
+def cache_file_id(url: str, file_id: str, quality=None):
+    key = (url, quality or "default")
+    with _cache_lock:
+        _file_id_cache[key] = file_id
 
 
 def store_pending_url(url: str) -> str:
     import uuid
+
     short_id = uuid.uuid4().hex[:10]
-    _pending_urls[short_id] = url
+
+    with _cache_lock:
+        _pending_urls[short_id] = (url, time.time())
+
     return short_id
 
 
 def get_pending_url(short_id: str):
-    return _pending_urls.get(short_id)
+    with _cache_lock:
+        item = _pending_urls.get(short_id)
+
+        if not item:
+            return None
+
+        url, created = item
+
+        if time.time() - created > PENDING_TTL:
+            del _pending_urls[short_id]
+            return None
+
+        return url
 
 
-def _base_extractor_opts() -> dict:
-    """Shared yt-dlp options (no format restriction) for metadata-only lookups."""
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "retries": config.DOWNLOAD_RETRIES,
-        "sleep_interval_requests": config.SLEEP_BETWEEN_REQUESTS,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["web"],
-            }
-        },
-    }
-    if os.path.exists(config.COOKIES_FILE):
-        opts["cookiefile"] = config.COOKIES_FILE
-    return opts
-
+# ---------------------------------------------------------
+# YT-DLP OPTIONS
+# ---------------------------------------------------------
 
 QUALITY_HEIGHTS = [1080, 720, 480, 360]
 
 
-def list_quality_options(url: str) -> dict:
-    """Metadata-only check (no download) of which qualities have a combined
-    video+audio format we could hand to Telegram as a direct URL. Returns
-    {'qualities': {'1080p': False, '720p': True, ...}, 'title': str,
-    'thumbnail': str or None} — callers should only offer buttons for
-    qualities marked True. Title/thumbnail come from the same metadata
-    call, so showing them costs no extra bandwidth.
-    """
-    qualities = {f"{h}p": False for h in QUALITY_HEIGHTS}
-    qualities["audio"] = False
+def _base_extractor_opts() -> dict:
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+
+        # Never download playlist
+        "noplaylist": True,
+
+        # Faster retry behaviour
+        "retries": max(1, int(getattr(config, "DOWNLOAD_RETRIES", 2))),
+        "fragment_retries": 2,
+
+        # Don't intentionally sleep
+        "sleep_interval": 0,
+        "sleep_interval_requests": 0,
+
+        # Don't write files
+        "skip_download": True,
+
+        # YouTube extraction
+        "extractor_args": {
+            "youtube": {
+                "player_client": [
+                    "android_vr",
+                    "web"
+                ]
+            }
+        },
+
+        # Avoid unnecessary processing
+        "geo_bypass": True,
+    }
+
+    cookie_file = getattr(config, "COOKIES_FILE", None)
+
+    if cookie_file and os.path.exists(cookie_file):
+        opts["cookiefile"] = cookie_file
+
+    return opts
+
+
+# ---------------------------------------------------------
+# METADATA
+# ---------------------------------------------------------
+
+def _extract_info(url: str):
+    now = time.time()
+
+    with _cache_lock:
+        cached = _metadata_cache.get(url)
+
+        if cached:
+            created, info = cached
+
+            if now - created < METADATA_TTL:
+                return info
 
     opts = _base_extractor_opts()
+
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
-    formats = info.get("formats", [info]) if isinstance(info, dict) else []
+    with _cache_lock:
+        _metadata_cache[url] = (now, info)
+
+    return info
+
+
+def list_quality_options(url: str) -> dict:
+    """
+    Only metadata lookup.
+    No video is downloaded to Render.
+    """
+
+    qualities = {
+        f"{h}p": False
+        for h in QUALITY_HEIGHTS
+    }
+
+    qualities["audio"] = False
+
+    info = _extract_info(url)
+
+    formats = info.get("formats", [])
 
     for f in formats:
-        acodec = f.get("acodec")
         vcodec = f.get("vcodec")
+        acodec = f.get("acodec")
         height = f.get("height")
-        has_audio = acodec not in (None, "none")
-        has_video = vcodec not in (None, "none")
 
-        if has_audio and has_video and height in QUALITY_HEIGHTS:
-            qualities[f"{height}p"] = True
-        elif has_audio and not has_video:
+        has_video = vcodec not in (None, "none")
+        has_audio = acodec not in (None, "none")
+
+        if has_audio and not has_video:
             qualities["audio"] = True
+
+        if has_video and has_audio and height:
+            for target in QUALITY_HEIGHTS:
+                if height == target:
+                    qualities[f"{target}p"] = True
 
     return {
         "qualities": qualities,
@@ -97,31 +185,124 @@ def list_quality_options(url: str) -> dict:
     }
 
 
+# ---------------------------------------------------------
+# DIRECT URL
+# ---------------------------------------------------------
+
 def get_direct_url_for_quality(url: str, quality: str):
-    """Metadata-only lookup of a direct URL for one specific quality
-    ('1080p'/'720p'/'480p'/'360p'/'audio'). Returns None if unavailable.
     """
-    opts = _base_extractor_opts()
+    Returns YouTube's direct media URL.
+    Render does NOT download the video.
+    """
+
+    info = _extract_info(url)
+    formats = info.get("formats", [])
+
     if quality == "audio":
-        opts["format"] = "bestaudio[acodec!=none]"
-    else:
-        height = quality.rstrip("p")
-        opts["format"] = f"best[height={height}][acodec!=none][vcodec!=none]"
+        candidates = [
+            f for f in formats
+            if f.get("acodec") not in (None, "none")
+            and f.get("vcodec") in (None, "none")
+            and f.get("url")
+        ]
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        return info.get("url")
+        if not candidates:
+            return None
 
+        # Highest quality audio
+        candidates.sort(
+            key=lambda x: (
+                x.get("abr") or 0,
+                x.get("filesize") or 0
+            ),
+            reverse=True
+        )
+
+        return candidates[0].get("url")
+
+    try:
+        target_height = int(quality.rstrip("p"))
+    except ValueError:
+        return None
+
+    # -----------------------------------------------------
+    # First preference:
+    # Exact height + audio + video
+    # -----------------------------------------------------
+
+    candidates = [
+        f for f in formats
+        if f.get("url")
+        and f.get("height") == target_height
+        and f.get("vcodec") not in (None, "none")
+        and f.get("acodec") not in (None, "none")
+    ]
+
+    if candidates:
+        candidates.sort(
+            key=lambda x: (
+                x.get("tbr") or 0,
+                x.get("filesize") or 0
+            ),
+            reverse=True
+        )
+
+        return candidates[0].get("url")
+
+    # -----------------------------------------------------
+    # Second preference:
+    # If exact quality isn't available, use nearest LOWER
+    # combined format.
+    # -----------------------------------------------------
+
+    candidates = [
+        f for f in formats
+        if f.get("url")
+        and f.get("height")
+        and f.get("height") <= target_height
+        and f.get("vcodec") not in (None, "none")
+        and f.get("acodec") not in (None, "none")
+    ]
+
+    if candidates:
+        candidates.sort(
+            key=lambda x: (
+                x.get("height") or 0,
+                x.get("tbr") or 0
+            ),
+            reverse=True
+        )
+
+        return candidates[0].get("url")
+
+    return None
+
+
+# ---------------------------------------------------------
+# SUBSCRIPTION
+# ---------------------------------------------------------
 
 async def is_subscribed(bot, user_id: int) -> bool:
-    """Check if a user is a member of the required channel."""
     if not config.FORCE_SUB_ENABLED:
         return True
+
     try:
-        member = await bot.get_chat_member(f"@{config.CHANNEL_USERNAME}", user_id)
-        return member.status in ("member", "administrator", "creator")
+        member = await bot.get_chat_member(
+            f"@{config.CHANNEL_USERNAME}",
+            user_id
+        )
+
+        return member.status in (
+            "member",
+            "administrator",
+            "creator"
+        )
+
     except Exception as e:
-        logger.error("Subscription check failed: %s", e)
-        # If the check itself fails (e.g. bot not admin in channel),
-        # fail safe by allowing access rather than blocking everyone.
+        logger.error(
+            "Subscription check failed: %s",
+            e
+        )
+
+        # Don't block everyone if Telegram temporarily fails
         return True
