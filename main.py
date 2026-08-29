@@ -70,7 +70,7 @@ def welcome_keyboard() -> InlineKeyboardMarkup:
 
 WELCOME_TEXT = (
     "👋 *স্বাগতম!*\n\n"
-    "আমাকে যেকোনো YouTube বা Terabox লিংক পাঠান, আমি ভিডিও ডাউনলোড করে দেব।\n\n"
+    "আমাকে যেকোনো YouTube লিংক পাঠান, আমি ভিডিও ডাউনলোড করে দেব।\n\n"
     "শুধু লিংকটা paste করুন, বাকিটা আমি করে দেব ⬇️"
 )
 
