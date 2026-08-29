@@ -8,9 +8,26 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Simple in-memory cache: {url: (filepath, timestamp)}
+# Local disk cache: {url: (filepath, timestamp)} — short-lived, cleared
+# when the download folder is cleaned up or the service restarts.
 _download_cache = {}
 CACHE_TTL_SECONDS = 3600  # 1 hour
+
+# Telegram file_id cache: {url: file_id} — once a video has been sent to
+# Telegram once, Telegram keeps its own copy. Reusing the file_id for the
+# next request of the same URL means we send a tiny text reference instead
+# of re-downloading from YouTube and re-uploading the whole file, which is
+# what actually costs Render bandwidth. This cache has no TTL since
+# Telegram file_ids for content a bot uploaded remain valid indefinitely.
+_file_id_cache = {}
+
+
+def get_cached_file_id(url: str):
+    return _file_id_cache.get(url)
+
+
+def cache_file_id(url: str, file_id: str):
+    _file_id_cache[url] = file_id
 
 
 def build_ydl_opts(output_path: str) -> dict:
@@ -64,6 +81,24 @@ def check_file_size(filepath: str) -> bool:
     """Returns True if file is within Telegram's upload limit."""
     size = os.path.getsize(filepath)
     return size <= config.MAX_FILE_SIZE_BYTES
+
+
+def get_direct_stream_url(url: str):
+    """Try to get a direct, progressive (video+audio combined) stream URL
+    without downloading anything — lets Telegram fetch the file itself,
+    which costs us ~zero bandwidth. Returns None if no suitable combined
+    format exists (common for modern YouTube videos/Shorts), in which case
+    the caller should fall back to the normal download-then-upload flow.
+    """
+    opts = build_ydl_opts("")  # outtmpl unused since download=False
+    opts["format"] = "best[acodec!=none][vcodec!=none]"
+
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        direct_url = info.get("url")
+        if direct_url and info.get("acodec") not in (None, "none") and info.get("vcodec") not in (None, "none"):
+            return direct_url
+    return None
 
 
 def download_video(url: str, file_id: str) -> str:
