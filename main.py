@@ -66,13 +66,16 @@ def welcome_keyboard() -> InlineKeyboardMarkup:
 
 WELCOME_TEXT = (
     "👋 *স্বাগতম!*\n\n"
-    "আমাকে যেকোনো YouTube লিংক পাঠান, আমি ভিডিও ডাউনলোড করে দেব।\n\n"
+    "আমাকে YouTube, Facebook, Instagram বা Twitter/X-এর যেকোনো লিংক পাঠান, "
+    "আমি কোয়ালিটি অপশন দেখাব।\n\n"
     "শুধু লিংকটা paste করুন, বাকিটা আমি করে দেব ⬇️"
 )
 
 HELP_TEXT_TEMPLATE = (
     "📋 *সাপোর্টেড সাইট:*\n{sites}\n\n"
-    "শুধু নিজের বা download-permitted কন্টেন্টের জন্য ব্যবহার করুন।"
+    "শুধু নিজের বা download-permitted কন্টেন্টের জন্য ব্যবহার করুন।\n\n"
+    "⚠️ Telegram বটের নিয়ম অনুযায়ী ৫০MB-র বেশি সাইজের ফাইল পাঠানো যায় না — "
+    "বড় ভিডিওর ক্ষেত্রে কম কোয়ালিটি বেছে নিন।"
 )
 
 
@@ -80,7 +83,6 @@ HELP_TEXT_TEMPLATE = (
 # FORCE-SUBSCRIBE GATE
 # ---------------------------------------------------------
 async def require_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Returns True if user can proceed, otherwise shows the join-channel prompt."""
     if not config.FORCE_SUB_ENABLED:
         return True
 
@@ -125,7 +127,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles inline button taps."""
     query = update.callback_query
     await query.answer()
 
@@ -158,9 +159,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Best case: we've already sent this exact video to Telegram before.
-    # Reuse Telegram's own file_id — this sends a tiny reference instead of
-    # re-downloading from YouTube and re-uploading the whole file, which is
-    # what actually costs Render bandwidth.
+    # Reuse Telegram's own file_id instead of downloading again.
     tg_file_id = utils.get_cached_file_id(url)
     if tg_file_id:
         try:
@@ -188,7 +187,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     available = [q for q, ok in qualities.items() if ok]
     if not available:
         await status_msg.edit_text(
-            "❌ এই ভিডিওটা এই মুহূর্তে সরাসরি পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।"
+            "❌ এই ভিডিওটা এই মুহূর্তে পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।"
         )
         return
 
@@ -208,10 +207,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await status_msg.delete()
 
-    # Show the video's own thumbnail + title (from the same metadata call
-    # above — no extra bandwidth) alongside the quality buttons. Plain text
-    # (no Markdown) since video titles often contain characters that would
-    # break Markdown parsing.
     caption_text = f"🎬 {title}\n\nকোয়ালিটি বেছে নিন:"
     if thumbnail:
         try:
@@ -234,43 +229,56 @@ async def quality_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     _, short_id, quality = query.data.split(":", 2)
     url = utils.get_pending_url(short_id)
 
-    # The message this button is attached to is a photo (thumbnail) message,
-    # so we must edit its caption, not its text.
     async def update_status(text: str):
         try:
             await query.message.edit_caption(caption=text)
         except Exception:
-            # Fallback in case it was ever a plain text message (no thumbnail)
             await query.message.edit_text(text)
 
     if not url:
         await update_status("❌ লিংকটা মেয়াদোত্তীর্ণ হয়ে গেছে, আবার পাঠান।")
         return
 
-    await update_status(f"⏳ {quality} পাঠানো হচ্ছে...")
+    await update_status(f"⏳ {quality} ডাউনলোড হচ্ছে...")
 
     loop = asyncio.get_running_loop()
-    try:
-        direct_url = await loop.run_in_executor(
-            None, utils.get_direct_url_for_quality, url, quality
+
+    # Actually download to local disk, then upload the local file. This
+    # avoids the "Failed to get http url content" error Telegram hits when
+    # given a YouTube-issued direct URL — those URLs are locked to the IP
+    # that requested them (our server), so Telegram's own servers can't
+    # fetch them directly.
+    result = await loop.run_in_executor(None, utils.download_media, url, quality)
+
+    if not result:
+        await update_status(
+            f"❌ {quality}-তে পাঠানো যাচ্ছে না (ফাইল অনেক বড় হতে পারে, বা এই মুহূর্তে সমস্যা হচ্ছে)। "
+            "একটু পরে বা অন্য কোয়ালিটি দিয়ে আবার চেষ্টা করুন।"
         )
-        if not direct_url:
-            await update_status(
-                f"❌ {quality}-তে এই মুহূর্তে পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।"
-            )
-            return
+        return
 
-        if quality == "audio":
-            sent = await query.message.reply_audio(audio=direct_url, caption="✅ এখানে আপনার অডিও")
-        else:
-            sent = await query.message.reply_video(video=direct_url, caption="✅ এখানে আপনার ভিডিও")
+    await update_status("📤 আপলোড হচ্ছে...")
 
-        utils.cache_file_id(url, sent.video.file_id if quality != "audio" else sent.audio.file_id)
+    filepath = result["path"]
+    try:
+        with open(filepath, "rb") as media_file:
+            if result["is_audio"]:
+                sent = await query.message.reply_audio(audio=media_file, caption="✅ এখানে আপনার অডিও")
+                utils.cache_file_id(url, sent.audio.file_id)
+            else:
+                sent = await query.message.reply_video(video=media_file, caption="✅ এখানে আপনার ভিডিও")
+                utils.cache_file_id(url, sent.video.file_id)
+
         await query.message.delete()
 
     except Exception as e:
-        logger.info("Quality-specific send failed: %s", e)
-        await update_status("❌ এই মুহূর্তে পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।")
+        logger.info("Upload failed: %s", e)
+        await update_status("❌ আপলোড করার সময় সমস্যা হয়েছে, একটু পরে আবার চেষ্টা করুন।")
+
+    finally:
+        # Always clean up the local file, whether upload succeeded or not —
+        # this is what keeps disk usage from growing over time.
+        utils.delete_file(filepath)
 
 
 # ---------------------------------------------------------
