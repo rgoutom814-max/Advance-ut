@@ -22,7 +22,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-import yt_dlp
 
 import config
 import utils
@@ -189,11 +188,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dl_id = str(update.message.message_id)
     loop = asyncio.get_running_loop()
 
-    # Bandwidth-saving attempt: ask Telegram to fetch the video directly
-    # from YouTube's own CDN URL instead of us downloading + re-uploading.
-    # This only works when a combined video+audio format exists and when
-    # YouTube's URL isn't IP-locked to our server — so we try it first and
-    # silently fall back to the normal flow on any failure.
+    # Bandwidth-protection mode: ONLY send the video if we can hand
+    # Telegram a direct URL to fetch itself. If no combined video+audio
+    # format exists, or Telegram fails to fetch that URL, we deliberately
+    # do NOT fall back to downloading through our own server — that
+    # fallback is what actually costs Render bandwidth, and it's disabled
+    # on purpose here.
     try:
         direct_url = await loop.run_in_executor(None, utils.get_direct_stream_url, url)
         if direct_url:
@@ -201,37 +201,18 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             utils.cache_file_id(url, sent.video.file_id)
             await status_msg.delete()
             return
-    except Exception as e:
-        logger.info("Direct-URL send failed, falling back to normal download: %s", e)
-
-    try:
-        filepath = await loop.run_in_executor(None, utils.download_video, url, dl_id)
-
-        if not utils.check_file_size(filepath):
+        else:
             await status_msg.edit_text(
-                f"❌ ভিডিওটা {config.MAX_FILE_SIZE_MB}MB এর চেয়ে বড়, "
-                "Telegram-এর নিয়মে এত বড় ফাইল বট দিয়ে পাঠানো যায় না।"
+                "❌ এই ভিডিওটা এই মুহূর্তে সরাসরি পাঠানো যাচ্ছে না "
+                "(এতে আলাদা video ও audio stream থাকায় সরাসরি পাঠানো সম্ভব না)।"
             )
-            os.remove(filepath)
             return
-
-        await status_msg.edit_text("📤 আপলোড হচ্ছে...")
-
-        with open(filepath, "rb") as video_file:
-            sent = await update.message.reply_video(video=video_file, caption="✅ এখানে আপনার ভিডিও")
-
-        utils.cache_file(url, filepath)
-        utils.cache_file_id(url, sent.video.file_id)
-        await status_msg.delete()
-
-    except yt_dlp.utils.DownloadError as e:
-        err_text = str(e)
-        await status_msg.edit_text(utils.friendly_error_message(err_text))
-        logger.error("Download error: %s", err_text)
-
     except Exception as e:
-        await status_msg.edit_text("❌ একটা অপ্রত্যাশিত সমস্যা হয়েছে, আবার চেষ্টা করুন।")
-        logger.exception("Unexpected error: %s", e)
+        logger.info("Direct-URL send failed: %s", e)
+        await status_msg.edit_text(
+            "❌ ভিডিওটা এই মুহূর্তে পাঠানো যায়নি, একটু পরে আবার চেষ্টা করুন।"
+        )
+        return
 
 
 # ---------------------------------------------------------
