@@ -3,6 +3,11 @@ import logging
 import asyncio
 import threading
 
+# Make the Deno JS runtime (installed into ./bin by the Render build
+# command) visible to yt-dlp — YouTube now requires a JS runtime to
+# decode video signatures, and Render's sandbox won't let us apt-get
+# install one system-wide, so we install it into the project folder
+# and add that folder to PATH here, before yt-dlp is ever used.
 _BIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
 os.environ["PATH"] = _BIN_DIR + os.pathsep + os.environ.get("PATH", "")
 
@@ -26,26 +31,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------
+# KEEP-ALIVE WEB SERVER (Render Web Service needs an open port)
+# ---------------------------------------------------------
 flask_app = Flask(__name__)
+
 
 @flask_app.route("/")
 def home():
     return "Bot is alive!"
 
+
 def run_flask():
     flask_app.run(host="0.0.0.0", port=config.PORT)
 
-def join_channel_keyboard():
+
+# ---------------------------------------------------------
+# UI HELPERS
+# ---------------------------------------------------------
+def join_channel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 চ্যানেলে জয়েন করুন", url=f"https://t.me/{config.CHANNEL_USERNAME}")],
         [InlineKeyboardButton("✅ জয়েন করেছি, আবার চেষ্টা করুন", callback_data="check_sub")],
     ])
 
-def welcome_keyboard():
+
+def welcome_keyboard() -> InlineKeyboardMarkup:
     buttons = [[InlineKeyboardButton("ℹ️ সাপোর্টেড সাইট", callback_data="show_help")]]
     if config.FORCE_SUB_ENABLED:
         buttons.append([InlineKeyboardButton("📢 আমাদের চ্যানেল", url=f"https://t.me/{config.CHANNEL_USERNAME}")])
     return InlineKeyboardMarkup(buttons)
+
 
 WELCOME_TEXT = (
     "👋 *স্বাগতম!*\n\n"
@@ -58,12 +75,19 @@ HELP_TEXT_TEMPLATE = (
     "শুধু নিজের বা download-permitted কন্টেন্টের জন্য ব্যবহার করুন।"
 )
 
-async def require_subscription(update, context):
+
+# ---------------------------------------------------------
+# FORCE-SUBSCRIBE GATE
+# ---------------------------------------------------------
+async def require_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Returns True if user can proceed, otherwise shows the join-channel prompt."""
     if not config.FORCE_SUB_ENABLED:
         return True
+
     user_id = update.effective_user.id
     if await utils.is_subscribed(context.bot, user_id):
         return True
+
     text = (
         "🔒 বট ব্যবহার করতে হলে আগে আমাদের চ্যানেলে জয়েন করতে হবে।\n\n"
         "নিচের বাটনে চ্যানেলে জয়েন করে, তারপর *\"জয়েন করেছি\"* বাটনে চাপুন।"
@@ -78,24 +102,33 @@ async def require_subscription(update, context):
         )
     return False
 
-async def start(update, context):
+
+# ---------------------------------------------------------
+# TELEGRAM HANDLERS
+# ---------------------------------------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_subscription(update, context):
         return
     await update.message.reply_text(
         WELCOME_TEXT, reply_markup=welcome_keyboard(), parse_mode="Markdown"
     )
 
-async def help_command(update, context):
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_subscription(update, context):
         return
     sites = "\n".join(f"• {s}" for s in config.SUPPORTED_SITES)
     await update.message.reply_text(
-        HELP_TEXT_TEMPLATE.format(sites=sites), parse_mode="Markdown"
+        HELP_TEXT_TEMPLATE.format(sites=sites),
+        parse_mode="Markdown",
     )
 
-async def button_handler(update, context):
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles inline button taps."""
     query = update.callback_query
     await query.answer()
+
     if query.data == "check_sub":
         if await utils.is_subscribed(context.bot, update.effective_user.id):
             await query.message.edit_text(
@@ -103,15 +136,18 @@ async def button_handler(update, context):
             )
         else:
             await query.answer("❌ এখনো জয়েন করেননি!", show_alert=True)
+
     elif query.data == "show_help":
         if not await require_subscription(update, context):
             return
         sites = "\n".join(f"• {s}" for s in config.SUPPORTED_SITES)
         await query.message.edit_text(
-            HELP_TEXT_TEMPLATE.format(sites=sites), parse_mode="Markdown"
+            HELP_TEXT_TEMPLATE.format(sites=sites),
+            parse_mode="Markdown",
         )
 
-async def handle_link(update, context):
+
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_subscription(update, context):
         return
 
@@ -121,12 +157,14 @@ async def handle_link(update, context):
         await update.message.reply_text("⚠️ একটা সঠিক লিংক পাঠান।")
         return
 
+    # Best case: we've already sent this exact video to Telegram before.
+    # Reuse Telegram's own file_id — this sends a tiny reference instead of
+    # re-downloading from YouTube and re-uploading the whole file, which is
+    # what actually costs Render bandwidth.
     tg_file_id = utils.get_cached_file_id(url)
     if tg_file_id:
         try:
-            await update.message.reply_video(
-                video=tg_file_id, caption="✅ এখানে আপনার ভিডিও"
-            )
+            await update.message.reply_video(video=tg_file_id, caption="✅ এখানে আপনার ভিডিও")
             return
         except Exception as e:
             logger.warning("Cached file_id failed, continuing normally: %s", e)
@@ -156,6 +194,7 @@ async def handle_link(update, context):
 
     short_id = utils.store_pending_url(url)
 
+    # Order: video qualities high-to-low, then audio, two per row.
     ordered = [f"{h}p" for h in utils.QUALITY_HEIGHTS if f"{h}p" in available]
     if "audio" in available:
         ordered.append("audio")
@@ -169,37 +208,40 @@ async def handle_link(update, context):
 
     await status_msg.delete()
 
+    # Show the video's own thumbnail + title (from the same metadata call
+    # above — no extra bandwidth) alongside the quality buttons. Plain text
+    # (no Markdown) since video titles often contain characters that would
+    # break Markdown parsing.
     caption_text = f"🎬 {title}\n\nকোয়ালিটি বেছে নিন:"
     if thumbnail:
         try:
             await update.message.reply_photo(
                 photo=thumbnail,
-                caption=caption_text[:1024],
+                caption=caption_text[:1024],  # Telegram caption length limit
                 reply_markup=InlineKeyboardMarkup(rows),
             )
             return
         except Exception as e:
             logger.info("Thumbnail send failed, falling back to text: %s", e)
 
-    await update.message.reply_text(
-        caption_text, reply_markup=InlineKeyboardMarkup(rows)
-    )
+    await update.message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(rows))
 
-async def quality_button_handler(update, context):
+
+async def quality_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     _, short_id, quality = query.data.split(":", 2)
     url = utils.get_pending_url(short_id)
 
-    async def update_status(text):
+    # The message this button is attached to is a photo (thumbnail) message,
+    # so we must edit its caption, not its text.
+    async def update_status(text: str):
         try:
             await query.message.edit_caption(caption=text)
         except Exception:
-            try:
-                await query.message.edit_text(text)
-            except Exception:
-                pass
+            # Fallback in case it was ever a plain text message (no thumbnail)
+            await query.message.edit_text(text)
 
     if not url:
         await update_status("❌ লিংকটা মেয়াদোত্তীর্ণ হয়ে গেছে, আবার পাঠান।")
@@ -219,24 +261,21 @@ async def quality_button_handler(update, context):
             return
 
         if quality == "audio":
-            sent = await query.message.reply_audio(
-                audio=direct_url, caption="✅ এখানে আপনার অডিও"
-            )
-            if sent.audio:
-                utils.cache_file_id(url, sent.audio.file_id)
+            sent = await query.message.reply_audio(audio=direct_url, caption="✅ এখানে আপনার অডিও")
         else:
-            sent = await query.message.reply_video(
-                video=direct_url, caption="✅ এখানে আপনার ভিডিও"
-            )
-            if sent.video:
-                utils.cache_file_id(url, sent.video.file_id)
+            sent = await query.message.reply_video(video=direct_url, caption="✅ এখানে আপনার ভিডিও")
 
+        utils.cache_file_id(url, sent.video.file_id if quality != "audio" else sent.audio.file_id)
         await query.message.delete()
 
     except Exception as e:
         logger.info("Quality-specific send failed: %s", e)
         await update_status("❌ এই মুহূর্তে পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।")
 
+
+# ---------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------
 def main():
     if not config.BOT_TOKEN:
         raise RuntimeError(
@@ -251,13 +290,11 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(quality_button_handler, pattern=r"^dl:"))
     application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link)
-    )
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
 
     logger.info("Bot is starting...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
+
 if __name__ == "__main__":
     main()
-            
