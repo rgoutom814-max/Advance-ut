@@ -17,9 +17,8 @@ def build_ydl_opts(output_path: str) -> dict:
     opts = {
         "format": config.FORMAT_PRIORITY,
         "outtmpl": output_path,
-        "quiet": False,
-        "no_warnings": False,
-        "verbose": True,
+        "quiet": True,
+        "no_warnings": True,
         "noplaylist": True,
         "retries": config.DOWNLOAD_RETRIES,
         "sleep_interval_requests": config.SLEEP_BETWEEN_REQUESTS,
@@ -28,12 +27,13 @@ def build_ydl_opts(output_path: str) -> dict:
         # Point yt-dlp at the portable ffmpeg binary bundled with imageio-ffmpeg,
         # since Render's native Python environment can't apt-get install ffmpeg.
         "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
-        # Use the "android" player client instead of "web" — this avoids
-        # YouTube's newer PO-Token / "page needs to be reloaded" check that
-        # the default web client currently triggers.
+        # "android" doesn't work together with cookies (yt-dlp skips it),
+        # and plain "web" now needs a JS engine to solve YouTube's
+        # signature/n-challenge that isn't available here. "tv" works fine
+        # with cookies and doesn't need JS challenge solving.
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web"],
+                "player_client": ["tv", "web"],
             }
         },
     }
