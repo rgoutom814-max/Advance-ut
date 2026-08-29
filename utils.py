@@ -27,22 +27,18 @@ def build_ydl_opts(output_path: str) -> dict:
         # Point yt-dlp at the portable ffmpeg binary bundled with imageio-ffmpeg,
         # since Render's native Python environment can't apt-get install ffmpeg.
         "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
-        # Mobile app clients (android/ios) mimic YouTube's own apps and
-        # currently avoid both the "sign in to confirm you're not a bot"
-        # check AND the newer PO-Token/JS-challenge requirement that "web"
-        # and "tv" now hit. They don't support cookies, so we deliberately
-        # do NOT pass cookiefile here — mixing cookies in makes yt-dlp skip
-        # these clients entirely and fall back to the broken "web" client.
+        # IMPORTANT: never combine cookies with the "tv" client — yt-dlp's
+        # own docs confirm doing so invalidates the cookie session entirely.
+        # "web" is the only client that reliably works together with cookies
+        # for bypassing the "sign in to confirm you're not a bot" check.
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios"],
+                "player_client": ["web"],
             }
         },
     }
-    # NOTE: cookies.txt intentionally not applied when using android/ios
-    # clients — see comment above. If YouTube starts blocking these clients
-    # too, cookies may need to be reintroduced together with a different
-    # client combination.
+    if os.path.exists(config.COOKIES_FILE):
+        opts["cookiefile"] = config.COOKIES_FILE
     return opts
 
 
