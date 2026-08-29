@@ -173,7 +173,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_running_loop()
 
     try:
-        options = await loop.run_in_executor(None, utils.list_quality_options, url)
+        info = await loop.run_in_executor(None, utils.list_quality_options, url)
     except Exception as e:
         logger.info("Quality lookup failed: %s", e)
         await status_msg.edit_text(
@@ -181,7 +181,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    available = [q for q, ok in options.items() if ok]
+    qualities = info["qualities"]
+    title = info["title"]
+    thumbnail = info["thumbnail"]
+
+    available = [q for q, ok in qualities.items() if ok]
     if not available:
         await status_msg.edit_text(
             "❌ এই ভিডিওটা এই মুহূর্তে সরাসরি পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।"
@@ -202,9 +206,25 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
-    await status_msg.edit_text(
-        "✅ কোয়ালিটি বেছে নিন:", reply_markup=InlineKeyboardMarkup(rows)
-    )
+    await status_msg.delete()
+
+    # Show the video's own thumbnail + title (from the same metadata call
+    # above — no extra bandwidth) alongside the quality buttons. Plain text
+    # (no Markdown) since video titles often contain characters that would
+    # break Markdown parsing.
+    caption_text = f"🎬 {title}\n\nকোয়ালিটি বেছে নিন:"
+    if thumbnail:
+        try:
+            await update.message.reply_photo(
+                photo=thumbnail,
+                caption=caption_text[:1024],  # Telegram caption length limit
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+        except Exception as e:
+            logger.info("Thumbnail send failed, falling back to text: %s", e)
+
+    await update.message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def quality_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -214,11 +234,20 @@ async def quality_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     _, short_id, quality = query.data.split(":", 2)
     url = utils.get_pending_url(short_id)
 
+    # The message this button is attached to is a photo (thumbnail) message,
+    # so we must edit its caption, not its text.
+    async def update_status(text: str):
+        try:
+            await query.message.edit_caption(caption=text)
+        except Exception:
+            # Fallback in case it was ever a plain text message (no thumbnail)
+            await query.message.edit_text(text)
+
     if not url:
-        await query.message.edit_text("❌ লিংকটা মেয়াদোত্তীর্ণ হয়ে গেছে, আবার পাঠান।")
+        await update_status("❌ লিংকটা মেয়াদোত্তীর্ণ হয়ে গেছে, আবার পাঠান।")
         return
 
-    await query.message.edit_text(f"⏳ {quality} পাঠানো হচ্ছে...")
+    await update_status(f"⏳ {quality} পাঠানো হচ্ছে...")
 
     loop = asyncio.get_running_loop()
     try:
@@ -226,7 +255,7 @@ async def quality_button_handler(update: Update, context: ContextTypes.DEFAULT_T
             None, utils.get_direct_url_for_quality, url, quality
         )
         if not direct_url:
-            await query.message.edit_text(
+            await update_status(
                 f"❌ {quality}-তে এই মুহূর্তে পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।"
             )
             return
@@ -241,9 +270,7 @@ async def quality_button_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     except Exception as e:
         logger.info("Quality-specific send failed: %s", e)
-        await query.message.edit_text(
-            "❌ এই মুহূর্তে পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।"
-        )
+        await update_status("❌ এই মুহূর্তে পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।")
 
 
 # ---------------------------------------------------------
