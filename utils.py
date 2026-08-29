@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import yt_dlp
+import imageio_ffmpeg
 
 import config
 
@@ -23,6 +24,9 @@ def build_ydl_opts(output_path: str) -> dict:
         "sleep_interval_requests": config.SLEEP_BETWEEN_REQUESTS,
         # Merge separate video+audio streams into a single mp4 (requires ffmpeg)
         "merge_output_format": "mp4",
+        # Point yt-dlp at the portable ffmpeg binary bundled with imageio-ffmpeg,
+        # since Render's native Python environment can't apt-get install ffmpeg.
+        "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
         # Use the "android" player client instead of "web" — this avoids
         # YouTube's newer PO-Token / "page needs to be reloaded" check that
         # the default web client currently triggers.
