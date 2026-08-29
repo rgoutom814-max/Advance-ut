@@ -64,11 +64,13 @@ QUALITY_HEIGHTS = [1080, 720, 480, 360]
 def list_quality_options(url: str) -> dict:
     """Metadata-only check (no download) of which qualities have a combined
     video+audio format we could hand to Telegram as a direct URL. Returns
-    e.g. {'1080p': False, '720p': True, '480p': True, '360p': True,
-    'audio': True} — callers should only offer buttons for True entries.
+    {'qualities': {'1080p': False, '720p': True, ...}, 'title': str,
+    'thumbnail': str or None} — callers should only offer buttons for
+    qualities marked True. Title/thumbnail come from the same metadata
+    call, so showing them costs no extra bandwidth.
     """
-    result = {f"{h}p": False for h in QUALITY_HEIGHTS}
-    result["audio"] = False
+    qualities = {f"{h}p": False for h in QUALITY_HEIGHTS}
+    qualities["audio"] = False
 
     opts = _base_extractor_opts()
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -84,11 +86,15 @@ def list_quality_options(url: str) -> dict:
         has_video = vcodec not in (None, "none")
 
         if has_audio and has_video and height in QUALITY_HEIGHTS:
-            result[f"{height}p"] = True
+            qualities[f"{height}p"] = True
         elif has_audio and not has_video:
-            result["audio"] = True
+            qualities["audio"] = True
 
-    return result
+    return {
+        "qualities": qualities,
+        "title": info.get("title", "ভিডিও"),
+        "thumbnail": info.get("thumbnail"),
+    }
 
 
 def get_direct_url_for_quality(url: str, quality: str):
