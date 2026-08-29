@@ -162,20 +162,50 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ একটা সঠিক লিংক পাঠান।")
         return
 
+    # Best case: we've already sent this exact video to Telegram before.
+    # Reuse Telegram's own file_id — this sends a tiny reference instead of
+    # re-downloading from YouTube and re-uploading the whole file, which is
+    # what actually costs Render bandwidth.
+    tg_file_id = utils.get_cached_file_id(url)
+    if tg_file_id:
+        try:
+            await update.message.reply_video(video=tg_file_id, caption="✅ এখানে আপনার ভিডিও")
+            return
+        except Exception as e:
+            # file_id can occasionally go stale — fall through to a normal
+            # download instead of failing the request.
+            logger.warning("Cached file_id failed, re-downloading: %s", e)
+
     cached = utils.get_cached_file(url)
     if cached:
         await update.message.reply_text("⚡ আগে থেকেই আছে, পাঠাচ্ছি...")
         with open(cached, "rb") as video_file:
-            await update.message.reply_video(video=video_file, caption="✅ এখানে আপনার ভিডিও")
+            sent = await update.message.reply_video(video=video_file, caption="✅ এখানে আপনার ভিডিও")
+        utils.cache_file_id(url, sent.video.file_id)
         return
 
     status_msg = await update.message.reply_text("⏳ ডাউনলোড হচ্ছে, একটু অপেক্ষা করুন...")
 
-    file_id = str(update.message.message_id)
+    dl_id = str(update.message.message_id)
     loop = asyncio.get_running_loop()
 
+    # Bandwidth-saving attempt: ask Telegram to fetch the video directly
+    # from YouTube's own CDN URL instead of us downloading + re-uploading.
+    # This only works when a combined video+audio format exists and when
+    # YouTube's URL isn't IP-locked to our server — so we try it first and
+    # silently fall back to the normal flow on any failure.
     try:
-        filepath = await loop.run_in_executor(None, utils.download_video, url, file_id)
+        direct_url = await loop.run_in_executor(None, utils.get_direct_stream_url, url)
+        if direct_url:
+            sent = await update.message.reply_video(video=direct_url, caption="✅ এখানে আপনার ভিডিও")
+            utils.cache_file_id(url, sent.video.file_id)
+            await status_msg.delete()
+            return
+    except Exception as e:
+        logger.info("Direct-URL send failed, falling back to normal download: %s", e)
+
+    try:
+        filepath = await loop.run_in_executor(None, utils.download_video, url, dl_id)
 
         if not utils.check_file_size(filepath):
             await status_msg.edit_text(
@@ -188,9 +218,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text("📤 আপলোড হচ্ছে...")
 
         with open(filepath, "rb") as video_file:
-            await update.message.reply_video(video=video_file, caption="✅ এখানে আপনার ভিডিও")
+            sent = await update.message.reply_video(video=video_file, caption="✅ এখানে আপনার ভিডিও")
 
         utils.cache_file(url, filepath)
+        utils.cache_file_id(url, sent.video.file_id)
         await status_msg.delete()
 
     except yt_dlp.utils.DownloadError as e:
