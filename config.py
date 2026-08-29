@@ -11,7 +11,8 @@ DOWNLOAD_DIR = "downloads"
 COOKIES_FILE = "cookies.txt"
 
 # --- Limits ---
-# Telegram bots can't send files larger than 50MB through the Bot API
+# Telegram bots can't upload files larger than 50MB through the Bot API
+# (this only applies to our own uploads — direct-URL sends aren't affected).
 MAX_FILE_SIZE_MB = 50
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
