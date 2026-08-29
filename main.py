@@ -2,7 +2,6 @@ import os
 import logging
 import asyncio
 import threading
-from pathlib import Path
 
 # Make the Deno JS runtime (installed into ./bin by the Render build
 # command) visible to yt-dlp — YouTube now requires a JS runtime to
@@ -22,12 +21,9 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-import yt_dlp
 
 import config
 import utils
-
-Path(config.DOWNLOAD_DIR).mkdir(exist_ok=True)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -76,8 +72,6 @@ WELCOME_TEXT = (
 
 HELP_TEXT_TEMPLATE = (
     "📋 *সাপোর্টেড সাইট:*\n{sites}\n\n"
-    "⚠️ Facebook/Instagram-এ {size}MB এর বেশি ভিডিও পাঠানো যাবে না (Telegram-এর নিয়ম)। "
-    "YouTube-এ এই সীমা প্রযোজ্য না।\n"
     "শুধু নিজের বা download-permitted কন্টেন্টের জন্য ব্যবহার করুন।"
 )
 
@@ -125,7 +119,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     sites = "\n".join(f"• {s}" for s in config.SUPPORTED_SITES)
     await update.message.reply_text(
-        HELP_TEXT_TEMPLATE.format(sites=sites, size=config.MAX_FILE_SIZE_MB),
+        HELP_TEXT_TEMPLATE.format(sites=sites),
         parse_mode="Markdown",
     )
 
@@ -148,7 +142,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         sites = "\n".join(f"• {s}" for s in config.SUPPORTED_SITES)
         await query.message.edit_text(
-            HELP_TEXT_TEMPLATE.format(sites=sites, size=config.MAX_FILE_SIZE_MB),
+            HELP_TEXT_TEMPLATE.format(sites=sites),
             parse_mode="Markdown",
         )
 
@@ -173,75 +167,83 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_video(video=tg_file_id, caption="✅ এখানে আপনার ভিডিও")
             return
         except Exception as e:
-            # file_id can occasionally go stale — fall through to a normal
-            # download instead of failing the request.
-            logger.warning("Cached file_id failed, re-downloading: %s", e)
+            logger.warning("Cached file_id failed, continuing normally: %s", e)
 
-    cached = utils.get_cached_file(url)
-    if cached:
-        await update.message.reply_text("⚡ আগে থেকেই আছে, পাঠাচ্ছি...")
-        with open(cached, "rb") as video_file:
-            sent = await update.message.reply_video(video=video_file, caption="✅ এখানে আপনার ভিডিও")
-        utils.cache_file_id(url, sent.video.file_id)
-        return
-
-    status_msg = await update.message.reply_text("⏳ ডাউনলোড হচ্ছে, একটু অপেক্ষা করুন...")
-
-    dl_id = str(update.message.message_id)
+    status_msg = await update.message.reply_text("🔍 কোয়ালিটি খুঁজছি...")
     loop = asyncio.get_running_loop()
 
-    is_youtube = ("youtube.com" in url) or ("youtu.be" in url)
-
-    # Always try the bandwidth-free direct-URL method first, for every
-    # platform.
     try:
-        direct_url = await loop.run_in_executor(None, utils.get_direct_stream_url, url)
-        if direct_url:
-            sent = await update.message.reply_video(video=direct_url, caption="✅ এখানে আপনার ভিডিও")
-            utils.cache_file_id(url, sent.video.file_id)
-            await status_msg.delete()
-            return
+        options = await loop.run_in_executor(None, utils.list_quality_options, url)
     except Exception as e:
-        logger.info("Direct-URL send failed: %s", e)
+        logger.info("Quality lookup failed: %s", e)
+        await status_msg.edit_text(
+            "❌ এই লিংকটা থেকে তথ্য আনা যায়নি, লিংকটা সঠিক কিনা দেখুন।"
+        )
+        return
 
-    # YouTube: bandwidth-protection is strict — never fall back to a real
-    # download, since YouTube succeeds via direct-URL often enough that
-    # the fallback isn't worth the bandwidth cost.
-    if is_youtube:
+    available = [q for q, ok in options.items() if ok]
+    if not available:
         await status_msg.edit_text(
             "❌ এই ভিডিওটা এই মুহূর্তে সরাসরি পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।"
         )
         return
 
-    # Facebook/Instagram/others: direct-URL succeeds less often here, so we
-    # allow a normal download+upload fallback (this does cost bandwidth).
-    try:
-        filepath = await loop.run_in_executor(None, utils.download_video, url, dl_id)
+    short_id = utils.store_pending_url(url)
 
-        if not utils.check_file_size(filepath):
-            await status_msg.edit_text(
-                f"❌ ভিডিওটা {config.MAX_FILE_SIZE_MB}MB এর চেয়ে বড়, "
-                "Telegram-এর নিয়মে এত বড় ফাইল বট দিয়ে পাঠানো যায় না।"
+    # Order: video qualities high-to-low, then audio, two per row.
+    ordered = [f"{h}p" for h in utils.QUALITY_HEIGHTS if f"{h}p" in available]
+    if "audio" in available:
+        ordered.append("audio")
+
+    labels = {q: ("🎵 Audio" if q == "audio" else f"🎬 {q}") for q in ordered}
+    buttons = [
+        InlineKeyboardButton(labels[q], callback_data=f"dl:{short_id}:{q}")
+        for q in ordered
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+    await status_msg.edit_text(
+        "✅ কোয়ালিটি বেছে নিন:", reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+
+async def quality_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    _, short_id, quality = query.data.split(":", 2)
+    url = utils.get_pending_url(short_id)
+
+    if not url:
+        await query.message.edit_text("❌ লিংকটা মেয়াদোত্তীর্ণ হয়ে গেছে, আবার পাঠান।")
+        return
+
+    await query.message.edit_text(f"⏳ {quality} পাঠানো হচ্ছে...")
+
+    loop = asyncio.get_running_loop()
+    try:
+        direct_url = await loop.run_in_executor(
+            None, utils.get_direct_url_for_quality, url, quality
+        )
+        if not direct_url:
+            await query.message.edit_text(
+                f"❌ {quality}-তে এই মুহূর্তে পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।"
             )
-            os.remove(filepath)
             return
 
-        await status_msg.edit_text("📤 আপলোড হচ্ছে...")
-        with open(filepath, "rb") as video_file:
-            sent = await update.message.reply_video(video=video_file, caption="✅ এখানে আপনার ভিডিও")
+        if quality == "audio":
+            sent = await query.message.reply_audio(audio=direct_url, caption="✅ এখানে আপনার অডিও")
+        else:
+            sent = await query.message.reply_video(video=direct_url, caption="✅ এখানে আপনার ভিডিও")
 
-        utils.cache_file(url, filepath)
-        utils.cache_file_id(url, sent.video.file_id)
-        await status_msg.delete()
-
-    except yt_dlp.utils.DownloadError as e:
-        err_text = str(e)
-        await status_msg.edit_text(utils.friendly_error_message(err_text))
-        logger.error("Download error: %s", err_text)
+        utils.cache_file_id(url, sent.video.file_id if quality != "audio" else sent.audio.file_id)
+        await query.message.delete()
 
     except Exception as e:
-        await status_msg.edit_text("❌ একটা অপ্রত্যাশিত সমস্যা হয়েছে, আবার চেষ্টা করুন।")
-        logger.exception("Unexpected error: %s", e)
+        logger.info("Quality-specific send failed: %s", e)
+        await query.message.edit_text(
+            "❌ এই মুহূর্তে পাঠানো যাচ্ছে না, একটু পরে আবার চেষ্টা করুন।"
+        )
 
 
 # ---------------------------------------------------------
@@ -259,6 +261,7 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CallbackQueryHandler(quality_button_handler, pattern=r"^dl:"))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
 
