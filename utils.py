@@ -1,17 +1,10 @@
 import os
-import time
 import logging
 import yt_dlp
-import imageio_ffmpeg
 
 import config
 
 logger = logging.getLogger(__name__)
-
-# Local disk cache: {url: (filepath, timestamp)} — short-lived, cleared
-# when the download folder is cleaned up or the service restarts.
-_download_cache = {}
-CACHE_TTL_SECONDS = 3600  # 1 hour
 
 # Telegram file_id cache: {url: file_id} — once a video has been sent to
 # Telegram once, Telegram keeps its own copy. Reusing the file_id for the
@@ -30,24 +23,30 @@ def cache_file_id(url: str, file_id: str):
     _file_id_cache[url] = file_id
 
 
-def build_ydl_opts(output_path: str) -> dict:
+# Short-lived mapping so inline-button callback_data (max 64 bytes) can
+# reference a full URL without embedding it directly.
+_pending_urls = {}
+
+
+def store_pending_url(url: str) -> str:
+    import uuid
+    short_id = uuid.uuid4().hex[:10]
+    _pending_urls[short_id] = url
+    return short_id
+
+
+def get_pending_url(short_id: str):
+    return _pending_urls.get(short_id)
+
+
+def _base_extractor_opts() -> dict:
+    """Shared yt-dlp options (no format restriction) for metadata-only lookups."""
     opts = {
-        "format": config.FORMAT_PRIORITY,
-        "outtmpl": output_path,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "retries": config.DOWNLOAD_RETRIES,
         "sleep_interval_requests": config.SLEEP_BETWEEN_REQUESTS,
-        # Merge separate video+audio streams into a single mp4 (requires ffmpeg)
-        "merge_output_format": "mp4",
-        # Point yt-dlp at the portable ffmpeg binary bundled with imageio-ffmpeg,
-        # since Render's native Python environment can't apt-get install ffmpeg.
-        "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
-        # IMPORTANT: never combine cookies with the "tv" client — yt-dlp's
-        # own docs confirm doing so invalidates the cookie session entirely.
-        # "web" is the only client that reliably works together with cookies
-        # for bypassing the "sign in to confirm you're not a bot" check.
         "extractor_args": {
             "youtube": {
                 "player_client": ["web"],
@@ -59,77 +58,53 @@ def build_ydl_opts(output_path: str) -> dict:
     return opts
 
 
-def get_cached_file(url: str):
-    """Return a cached filepath if it exists, is still valid, and the file is still on disk."""
-    entry = _download_cache.get(url)
-    if not entry:
-        return None
-
-    filepath, timestamp = entry
-    if time.time() - timestamp > CACHE_TTL_SECONDS or not os.path.exists(filepath):
-        _download_cache.pop(url, None)
-        return None
-
-    return filepath
+QUALITY_HEIGHTS = [1080, 720, 480, 360]
 
 
-def cache_file(url: str, filepath: str):
-    _download_cache[url] = (filepath, time.time())
-
-
-def check_file_size(filepath: str) -> bool:
-    """Returns True if file is within Telegram's upload limit."""
-    return os.path.getsize(filepath) <= config.MAX_FILE_SIZE_BYTES
-
-
-def get_direct_stream_url(url: str):
-    """Try to get a direct, progressive (video+audio combined) stream URL
-    without downloading anything — lets Telegram fetch the file itself,
-    which costs us ~zero bandwidth. Returns None if no suitable combined
-    format exists (common for modern YouTube videos/Shorts), in which case
-    the caller should fall back to the normal download-then-upload flow.
+def list_quality_options(url: str) -> dict:
+    """Metadata-only check (no download) of which qualities have a combined
+    video+audio format we could hand to Telegram as a direct URL. Returns
+    e.g. {'1080p': False, '720p': True, '480p': True, '360p': True,
+    'audio': True} — callers should only offer buttons for True entries.
     """
-    opts = build_ydl_opts("")  # outtmpl unused since download=False
-    opts["format"] = "best[acodec!=none][vcodec!=none]"
+    result = {f"{h}p": False for h in QUALITY_HEIGHTS}
+    result["audio"] = False
+
+    opts = _base_extractor_opts()
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    formats = info.get("formats", [info]) if isinstance(info, dict) else []
+
+    for f in formats:
+        acodec = f.get("acodec")
+        vcodec = f.get("vcodec")
+        height = f.get("height")
+        has_audio = acodec not in (None, "none")
+        has_video = vcodec not in (None, "none")
+
+        if has_audio and has_video and height in QUALITY_HEIGHTS:
+            result[f"{height}p"] = True
+        elif has_audio and not has_video:
+            result["audio"] = True
+
+    return result
+
+
+def get_direct_url_for_quality(url: str, quality: str):
+    """Metadata-only lookup of a direct URL for one specific quality
+    ('1080p'/'720p'/'480p'/'360p'/'audio'). Returns None if unavailable.
+    """
+    opts = _base_extractor_opts()
+    if quality == "audio":
+        opts["format"] = "bestaudio[acodec!=none]"
+    else:
+        height = quality.rstrip("p")
+        opts["format"] = f"best[height={height}][acodec!=none][vcodec!=none]"
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
-        direct_url = info.get("url")
-        if direct_url and info.get("acodec") not in (None, "none") and info.get("vcodec") not in (None, "none"):
-            return direct_url
-    return None
-
-
-def download_video(url: str, file_id: str) -> str:
-    """Blocking download call — run this in a thread executor from async code."""
-    output_path = os.path.join(config.DOWNLOAD_DIR, f"{file_id}.%(ext)s")
-    ydl_opts = build_ydl_opts(output_path)
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        return filename
-
-
-def friendly_error_message(error_text: str) -> str:
-    """Map common yt-dlp errors to short, clear Bengali messages."""
-    lowered = error_text.lower()
-
-    if "sign in to confirm" in lowered:
-        return (
-            "❌ YouTube এই মুহূর্তে এটাকে bot request মনে করছে।\n"
-            "সার্ভারে cookies.txt আপডেট করা দরকার হতে পারে।"
-        )
-    if "private video" in lowered:
-        return "❌ এই ভিডিওটা private, ডাউনলোড করা যাবে না।"
-    if "video unavailable" in lowered:
-        return "❌ ভিডিওটা এখন আর available নেই (মুছে ফেলা হয়েছে বা region-locked)।"
-    if "unsupported url" in lowered:
-        return "❌ এই লিংকটা এখনো সাপোর্ট করে না।"
-    if "no dlink" in lowered or "terabox" in lowered:
-        return "❌ Terabox লিংক থেকে ডাউনলোড লিংক পাওয়া যায়নি। লিংকটা আবার চেক করুন।"
-
-    return f"❌ ডাউনলোড ব্যর্থ হয়েছে:\n{error_text[:250]}"
+        return info.get("url")
 
 
 async def is_subscribed(bot, user_id: int) -> bool:
