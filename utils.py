@@ -21,6 +21,8 @@ def build_ydl_opts(output_path: str) -> dict:
         "noplaylist": True,
         "retries": config.DOWNLOAD_RETRIES,
         "sleep_interval_requests": config.SLEEP_BETWEEN_REQUESTS,
+        # Merge separate video+audio streams into a single mp4 (requires ffmpeg)
+        "merge_output_format": "mp4",
         # Use the "android" player client instead of "web" — this avoids
         # YouTube's newer PO-Token / "page needs to be reloaded" check that
         # the default web client currently triggers.
