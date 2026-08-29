@@ -1,5 +1,5 @@
 python-telegram-bot==21.4
-pip install --upgrade yt-dlp
+yt-dlp
 Flask==3.0.3
 python-dotenv==1.0.1
 imageio-ffmpeg
