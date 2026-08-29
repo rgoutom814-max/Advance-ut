@@ -4,6 +4,14 @@ import asyncio
 import threading
 from pathlib import Path
 
+# Make the Deno JS runtime (installed into ./bin by the Render build
+# command) visible to yt-dlp — YouTube now requires a JS runtime to
+# decode video signatures, and Render's sandbox won't let us apt-get
+# install one system-wide, so we install it into the project folder
+# and add that folder to PATH here, before yt-dlp is ever used.
+_BIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+os.environ["PATH"] = _BIN_DIR + os.pathsep + os.environ.get("PATH", "")
+
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -219,4 +227,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
