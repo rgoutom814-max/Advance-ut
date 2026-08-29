@@ -1,83 +1,23 @@
 import os
 
+# --- Telegram ---
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# =========================================================
-# TELEGRAM BOT
-# =========================================================
+# --- Server ---
+PORT = int(os.environ.get("PORT", 10000))
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# --- Paths ---
+COOKIES_FILE = "cookies.txt"
 
+# --- yt-dlp behavior ---
+SLEEP_BETWEEN_REQUESTS = 2  # seconds, helps avoid YouTube bot-detection
+DOWNLOAD_RETRIES = 3
 
-# =========================================================
-# RENDER
-# =========================================================
+# --- Supported platforms (shown in /help) ---
+SUPPORTED_SITES = ["YouTube", "Facebook", "Instagram", "Twitter / X"]
 
-PORT = int(os.getenv("PORT", "10000"))
-
-BASE_URL = os.getenv(
-    "BASE_URL",
-    os.getenv("RENDER_EXTERNAL_URL", "")
-).rstrip("/")
-
-
-# =========================================================
-# FORCE SUBSCRIBE
-# =========================================================
-
-CHANNEL_USERNAME = os.getenv(
-    "CHANNEL_USERNAME",
-    ""
-).lstrip("@").strip()
-
-FORCE_SUB_ENABLED = (
-    os.getenv(
-        "FORCE_SUB_ENABLED",
-        "false"
-    ).lower()
-    in ("true", "1", "yes", "on")
-)
-
-
-# =========================================================
-# YT-DLP
-# =========================================================
-
-DOWNLOAD_RETRIES = int(
-    os.getenv("DOWNLOAD_RETRIES", "2")
-)
-
-SLEEP_BETWEEN_REQUESTS = float(
-    os.getenv("SLEEP_BETWEEN_REQUESTS", "0")
-)
-
-
-# =========================================================
-# COOKIES
-# =========================================================
-
-COOKIES_FILE = os.getenv(
-    "COOKIES_FILE",
-    ""
-)
-
-
-# =========================================================
-# SUPPORTED SITES
-# =========================================================
-
-SUPPORTED_SITES = [
-    "YouTube",
-]
-
-
-# =========================================================
-# DEBUG
-# =========================================================
-
-DEBUG = (
-    os.getenv(
-        "DEBUG",
-        "false"
-    ).lower()
-    in ("true", "1", "yes", "on")
-)
+# --- Force Subscribe ---
+# Your channel's public username, without the @ symbol
+# Example: if your channel is https://t.me/mychannel, set CHANNEL_USERNAME = "mychannel"
+CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "")
+FORCE_SUB_ENABLED = bool(CHANNEL_USERNAME)
