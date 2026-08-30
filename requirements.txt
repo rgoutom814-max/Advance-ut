@@ -1,4 +1,2 @@
 python-telegram-bot==21.4
-yt-dlp[default]
-Flask==3.0.3
-python-dotenv==1.0.1
+git+https://github.com/Simatwa/y2mate-api.git
