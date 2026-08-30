@@ -1,7 +1,7 @@
 import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import yt_dlp
+from y2mate_api import Handler
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
@@ -13,7 +13,7 @@ class PingHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is running")
 
     def log_message(self, format, *args):
-        pass  # সার্ভার লগ চুপ রাখতে
+        pass
 
 
 def run_dummy_server():
@@ -21,15 +21,13 @@ def run_dummy_server():
     server = HTTPServer(("0.0.0.0", port), PingHandler)
     server.serve_forever()
 
+
 # ================== সেটিংস ==================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")   # Render-এর Environment Variable থেকে আসবে
-DOWNLOAD_DIR = "downloads"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 # =============================================
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable সেট করা নেই। Render Dashboard -> Environment এ গিয়ে যোগ করুন।")
-
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    raise ValueError("BOT_TOKEN environment variable সেট করা নেই।")
 
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -39,35 +37,21 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("একটা বৈধ YouTube লিংক পাঠান।")
         return
 
-    status_msg = await update.message.reply_text("ডাউনলোড হচ্ছে, একটু অপেক্ষা করুন...")
+    status_msg = await update.message.reply_text("প্রসেস করা হচ্ছে, একটু অপেক্ষা করুন...")
 
-    ydl_opts = {
-        "format": "best[ext=mp4]/best",
-        "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "max_filesize": 50 * 1024 * 1024,  # Telegram Bot API লিমিট ৫০MB
-    }
-
-    filename = None
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            title = info.get("title", "video")
-
-        await status_msg.edit_text(f"পাঠানো হচ্ছে: {title}")
-
-        with open(filename, "rb") as video_file:
-            await update.message.reply_video(video=video_file, caption=title)
-
-    except yt_dlp.utils.DownloadError as e:
-        await status_msg.edit_text(f"ডাউনলোড করা যায়নি: {str(e)[:200]}")
+        h = Handler(query=url, timeout=30)
+        found = False
+        for result in h.run(format="mp4", quality="auto", limit=1):
+            dlink = result.get("dlink")
+            title = result.get("title", "video")
+            if dlink:
+                found = True
+                await status_msg.edit_text(f"🎬 {title}\nডাউনলোড লিংক:\n{dlink}")
+        if not found:
+            await status_msg.edit_text("ডাউনলোড লিংক পাওয়া যায়নি।")
     except Exception as e:
-        await status_msg.edit_text(f"সমস্যা হয়েছে: {str(e)[:200]}")
-    finally:
-        if filename and os.path.exists(filename):
-            os.remove(filename)
+        await status_msg.edit_text(f"সমস্যা হয়েছে: {str(e)[:300]}")
 
 
 def main():
