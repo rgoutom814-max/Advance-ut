@@ -1,67 +1,52 @@
 import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from y2mate_api import Handler
-from telegram import Update
-from telegram.ext import Application, MessageHandler, ContextTypes, filters
+import requests
+import telebot
+
+# Render-এর Environment Variable থেকে স্বয়ংক্রিয়ভাবে টোকেন নিয়ে নেবে
+TOKEN = os.environ.get('TOKEN')
+bot = telebot.TeleBot(TOKEN)
 
 
-class PingHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running")
-
-    def log_message(self, format, *args):
-        pass
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+  bot.reply_to(
+      message,
+      'স্বাগতম! যেকোনো ভিডিওর লিংক পাঠান, আমি ডাউনলোড লিংক বের করে দিচ্ছি।',
+  )
 
 
-def run_dummy_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), PingHandler)
-    server.serve_forever()
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+  user_url = message.text
+  bot.reply_to(message, 'লিংক প্রসেস করা হচ্ছে, একটু অপেক্ষা করুন...')
+
+  try:
+    api_url = (
+        'https://api.vidssave.com/api/contentsite_api/media/download_redirect'
+    )
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like'
+            ' Gecko) Chrome/110.0.0.0 Mobile Safari/537.36'
+        ),
+        'Referer': 'https://vidssave.com/',
+    }
+    params = {'request': user_url}
+
+    response = requests.get(
+        api_url, headers=headers, params=params, allow_redirects=True
+    )
+
+    if response.url:
+      final_link = response.url
+      bot.reply_to(message, f'আপনার ডাউনলোড লিংক:\n{final_link}')
+    else:
+      bot.reply_to(message, 'ডাউনলোড লিংক পাওয়া যায়নি।')
+
+  except Exception as e:
+    bot.reply_to(message, f'একটি ত্রুটি ঘটেছে: {e}')
 
 
-# ================== সেটিংস ==================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# =============================================
-
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable সেট করা নেই।")
-
-
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-
-    if "youtube.com" not in url and "youtu.be" not in url:
-        await update.message.reply_text("একটা বৈধ YouTube লিংক পাঠান।")
-        return
-
-    status_msg = await update.message.reply_text("প্রসেস করা হচ্ছে, একটু অপেক্ষা করুন...")
-
-    try:
-        h = Handler(query=url, timeout=30)
-        found = False
-        for result in h.run(format="mp4", quality="auto", limit=1):
-            dlink = result.get("dlink")
-            title = result.get("title", "video")
-            if dlink:
-                found = True
-                await status_msg.edit_text(f"🎬 {title}\nডাউনলোড লিংক:\n{dlink}")
-        if not found:
-            await status_msg.edit_text("ডাউনলোড লিংক পাওয়া যায়নি।")
-    except Exception as e:
-        await status_msg.edit_text(f"সমস্যা হয়েছে: {str(e)[:300]}")
-
-
-def main():
-    threading.Thread(target=run_dummy_server, daemon=True).start()
-
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    print("বট চালু হয়েছে...")
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+  bot.polling()
+    
