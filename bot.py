@@ -2,8 +2,14 @@ import os
 import requests
 import telebot
 
-# Render-এর Environment Variable থেকে স্বয়ংক্রিয়ভাবে টোকেন নিয়ে নেবে
-TOKEN = os.environ.get('TOKEN')
+# Render-এর Environment Variable-এ থাকা BOT_TOKEN এখানে রিড করবে
+TOKEN = os.environ.get('BOT_TOKEN')
+
+if not TOKEN:
+  raise ValueError(
+      'BOT_TOKEN পাওয়া যায়নি! Render-এ সঠিকভাবে সেট করা আছে কিনা চেক করুন।'
+  )
+
 bot = telebot.TeleBot(TOKEN)
 
 
