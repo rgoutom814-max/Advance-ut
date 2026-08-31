@@ -2,7 +2,6 @@ import os
 import requests
 import telebot
 
-# Render-এর Environment Variable-এ থাকা BOT_TOKEN এখানে রিড করবে
 TOKEN = os.environ.get('BOT_TOKEN')
 
 if not TOKEN:
@@ -54,5 +53,6 @@ def handle_message(message):
 
 
 if __name__ == '__main__':
-  bot.polling()
-    
+  bot.remove_webhook()
+  bot.infinity_polling(skip_pending=True)
+  
